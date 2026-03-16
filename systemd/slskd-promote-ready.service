@@ -1,0 +1,7 @@
+[Unit]
+Description=Promote only complete settled slskd folders to ready queue
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/slskd-promote-ready.py --min-age-minutes 10

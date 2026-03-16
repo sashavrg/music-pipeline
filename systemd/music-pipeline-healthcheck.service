@@ -1,0 +1,7 @@
+[Unit]
+Description=Music pipeline periodic healthcheck
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/music-pipeline-healthcheck.sh

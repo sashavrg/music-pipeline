@@ -1,0 +1,14 @@
+# Secrets — never commit
+.env
+
+# Beets library database
+*.db
+
+# Logs and runtime state
+*.log
+*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo

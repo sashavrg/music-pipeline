@@ -1,0 +1,9 @@
+[Unit]
+Description=Run music pipeline healthcheck every 30 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+
+[Install]
+WantedBy=timers.target

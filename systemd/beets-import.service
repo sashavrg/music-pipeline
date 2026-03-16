@@ -1,0 +1,7 @@
+[Unit]
+Description=Beets auto-import from slskd scratch
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/beets-import.sh

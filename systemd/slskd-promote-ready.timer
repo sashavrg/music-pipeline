@@ -1,0 +1,9 @@
+[Unit]
+Description=Run slskd complete->ready promotion every 3 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=3min
+
+[Install]
+WantedBy=timers.target

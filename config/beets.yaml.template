@@ -1,0 +1,85 @@
+directory: ${MUSIC_LIBRARY_ROOT}
+library: ${BEETS_CONFIG_DIR}/library.db
+
+import:
+  move: yes
+  quiet: yes
+  timid: no
+  autotag: yes
+  from_scratch: no
+  duplicate_action: keep
+
+match:
+  strong_rec_thresh: 0.1
+
+paths:
+  default: $albumartist/$album%if{$year, ($year)}/$track $title
+  singleton: Non-Album/$artist/$title
+  comp: Compilations/$album%if{$year, ($year)}/$track $title
+
+plugins:
+  - chroma
+  - fetchart
+  - embedart
+  - fromfilename
+  - ftintitle
+  - lastgenre
+  - lyrics
+  - scrub
+  - discogs
+  # - absubmit      # deprecated, needs essentia binary
+  - duplicates
+  - missing
+  - badfiles
+  - unimported
+  - importadded
+  - plexupdate
+
+discogs:
+  user_token: ${DISCOGS_USER_TOKEN}
+  data_source_mismatch_penalty: 0.5
+
+# Genre tagging from Last.fm
+lastgenre:
+  auto: yes
+  count: 3
+  separator: "; "
+  source: album
+  fallback: ""
+  canonical: yes
+
+# Embed album art into file tags
+embedart:
+  auto: yes
+  ifempty: yes
+  maxwidth: 500
+
+# Strip junk tags before writing clean metadata
+scrub:
+  auto: yes
+
+# Fetch lyrics
+lyrics:
+  auto: yes
+  sources:
+    - lrclib
+
+# Normalize featured artists into title
+ftintitle:
+  auto: yes
+  format: feat.
+
+# Preserve file modification times as "added" date
+importadded:
+  preserve_mtimes: yes
+  preserve_write_mtimes: yes
+
+# Ignore non-music files in unimported scan
+unimported:
+  ignore_extensions: jpg jpeg png
+
+plex:
+  host: ${PLEX_HOST}
+  port: ${PLEX_PORT}
+  token: ${PLEX_TOKEN}
+  library_name: ${PLEX_LIBRARY_NAME}
