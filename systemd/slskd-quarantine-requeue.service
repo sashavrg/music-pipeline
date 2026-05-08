@@ -1,0 +1,9 @@
+[Unit]
+Description=Re-queue stalled quarantined albums via slskd
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/slskd-quarantine-requeue.py
+StandardOutput=journal
+StandardError=journal

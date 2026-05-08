@@ -1,0 +1,9 @@
+[Unit]
+Description=Search slskd for pending wishlist items
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/slskd-wishlist-check.py
+StandardOutput=journal
+StandardError=journal

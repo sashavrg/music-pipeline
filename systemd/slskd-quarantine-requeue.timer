@@ -1,0 +1,12 @@
+[Unit]
+Description=Run quarantine re-queue weekly
+Requires=slskd-quarantine-requeue.service
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+RandomizedDelaySec=30min
+Persistent=true
+Unit=slskd-quarantine-requeue.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run fill-missing-tracks every 6 hours
+Requires=slskd-fill-missing-tracks.service
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+Unit=slskd-fill-missing-tracks.service
+
+[Install]
+WantedBy=timers.target

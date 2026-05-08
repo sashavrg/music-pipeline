@@ -1,0 +1,9 @@
+[Unit]
+Description=Fill missing tracks in held complete/ folders via slskd
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/slskd-fill-missing-tracks.py
+StandardOutput=journal
+StandardError=journal

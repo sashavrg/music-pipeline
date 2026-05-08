@@ -1,0 +1,12 @@
+[Unit]
+Description=Run wishlist check daily
+Requires=slskd-wishlist-check.service
+
+[Timer]
+OnCalendar=*-*-* 14:00:00
+RandomizedDelaySec=15min
+Persistent=true
+Unit=slskd-wishlist-check.service
+
+[Install]
+WantedBy=timers.target

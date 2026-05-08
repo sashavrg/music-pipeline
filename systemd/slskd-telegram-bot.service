@@ -11,8 +11,9 @@ EnvironmentFile=/etc/default/slskd-telegram-bot
 ExecStart=/usr/local/bin/slskd-telegram-bot.py
 Restart=always
 RestartSec=5
-StandardOutput=append:/var/log/slskd-telegram-bot.log
-StandardError=append:/var/log/slskd-telegram-bot.log
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=slskd-telegram-bot
 
 [Install]
 WantedBy=multi-user.target

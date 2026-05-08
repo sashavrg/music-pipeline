@@ -1,0 +1,11 @@
+[Unit]
+Description=Run slskd incomplete watchdog every 30 minutes
+Requires=slskd-incomplete-watchdog.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Unit=slskd-incomplete-watchdog.service
+
+[Install]
+WantedBy=timers.target

@@ -245,7 +245,7 @@ def main():
         return 0
 
     log(f"[INFO] apply-staged-deletions: {len(staged_files)} file(s) to process")
-    conn = sqlite3.connect(LIB_DB)
+    conn = sqlite3.connect(LIB_DB, timeout=10)
     results = {"applied": 0, "skipped-not-consumed": 0,
                "skipped-stale": 0, "skipped-already-gone": 0, "error": 0}
     try:

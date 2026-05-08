@@ -1,6 +1,7 @@
 [Unit]
 Description=Promote only complete settled slskd folders to ready queue
 After=network-online.target
+Conflicts=beets-import.service
 
 [Service]
 Type=oneshot

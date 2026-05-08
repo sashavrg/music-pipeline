@@ -1,0 +1,9 @@
+[Unit]
+Description=Monitor slskd incomplete/ dir for stalled downloads
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/slskd-incomplete-watchdog.py
+StandardOutput=journal
+StandardError=journal
