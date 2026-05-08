@@ -1,0 +1,603 @@
+#!/usr/bin/env python3
+"""
+pipeline_db.py — Shared SQLite state for the slskd/beets music pipeline.
+
+All scripts import this module and call init_db() at startup.
+State that used to live in separate JSON files now lives in a single WAL-mode
+SQLite database at /var/lib/pipeline/pipeline.db.
+
+Tables:
+  held_folders      — promote-ready hold state (also read by fill-missing, healthcheck)
+  fill_attempts     — fill-missing-tracks history
+  quarantine_state  — quarantine-requeue cooldowns
+  incomplete_state  — incomplete-watchdog per-folder tracking
+  notify_queue      — telegram notification delivery queue (multi-writer, one consumer)
+  wishlist          — user's album wishlist (telegram bot + wishlist-check)
+"""
+
+import json
+import sqlite3
+import time
+from collections import Counter, defaultdict
+from contextlib import contextmanager
+from pathlib import Path
+
+DB_DIR  = Path('/var/lib/pipeline')
+DB_PATH = DB_DIR / 'pipeline.db'
+
+SLSKD_API_KEY_PATH = Path('/etc/slskd-api.key')
+_slskd_api_key_cache: str | None = None
+
+
+def slskd_api_key() -> str:
+    """
+    Read the slskd API key once per process. Returns '' if the key file
+    isn't present (slskd auth disabled — older deployments).
+    """
+    global _slskd_api_key_cache
+    if _slskd_api_key_cache is None:
+        try:
+            _slskd_api_key_cache = SLSKD_API_KEY_PATH.read_text(encoding='utf-8').strip()
+        except Exception:
+            _slskd_api_key_cache = ''
+    return _slskd_api_key_cache
+
+
+def slskd_headers(extra: dict | None = None) -> dict:
+    """Standard headers for slskd REST API requests, including auth."""
+    h = {'Accept': 'application/json'}
+    key = slskd_api_key()
+    if key:
+        h['X-API-Key'] = key
+    if extra:
+        h.update(extra)
+    return h
+
+# Legacy paths for one-time JSON migration
+_LEGACY = {
+    'hold':       Path('/var/lib/slskd-promote-ready/hold-state.json'),
+    'fill':       Path('/var/lib/slskd-fill-missing/state.json'),
+    'quarantine': Path('/var/lib/slskd-quarantine-requeue/state.json'),
+    'incomplete': Path('/var/lib/slskd-incomplete-watchdog/state.json'),
+    'notify':     Path('/var/lib/slskd-telegram-bot/notify-queue.jsonl'),
+}
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS held_folders (
+    folder_name   TEXT PRIMARY KEY,
+    first_seen    REAL NOT NULL,
+    reason        TEXT NOT NULL DEFAULT '',
+    files_present INTEGER NOT NULL DEFAULT 0,
+    updated_at    REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS fill_attempts (
+    folder_name   TEXT PRIMARY KEY,
+    last_queued   REAL NOT NULL DEFAULT 0,
+    queued_tracks TEXT NOT NULL DEFAULT '[]',
+    queued_files  INTEGER NOT NULL DEFAULT 0,
+    source_user   TEXT NOT NULL DEFAULT '',
+    source_fmt    TEXT NOT NULL DEFAULT '',
+    source_score  INTEGER NOT NULL DEFAULT 0,
+    updated_at    REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS quarantine_state (
+    key           TEXT PRIMARY KEY,
+    last_attempt  REAL NOT NULL DEFAULT 0,
+    last_queued   REAL NOT NULL DEFAULT 0,
+    updated_at    REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS incomplete_state (
+    folder_name       TEXT PRIMARY KEY,
+    first_seen        REAL NOT NULL,
+    alerted           INTEGER NOT NULL DEFAULT 0,
+    requeued          INTEGER NOT NULL DEFAULT 0,
+    last_search_time  REAL NOT NULL DEFAULT 0,
+    requeue_time      TEXT NOT NULL DEFAULT '',
+    updated_at        REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS notify_queue (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    event        TEXT NOT NULL,
+    folder       TEXT NOT NULL DEFAULT '',
+    payload      TEXT NOT NULL DEFAULT '{}',
+    created_at   REAL NOT NULL,
+    delivered_at REAL
+);
+CREATE TABLE IF NOT EXISTS wishlist (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    artist       TEXT NOT NULL,
+    album        TEXT NOT NULL,
+    added_at     REAL NOT NULL,
+    added_by     TEXT NOT NULL DEFAULT 'telegram',
+    last_attempt REAL,
+    last_queued  REAL,
+    fulfilled_at REAL,
+    note         TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS schema_version (
+    name        TEXT PRIMARY KEY,
+    applied_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_notify_pending ON notify_queue (delivered_at) WHERE delivered_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_wishlist_pending ON wishlist (fulfilled_at) WHERE fulfilled_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_notify_delivered ON notify_queue (delivered_at) WHERE delivered_at IS NOT NULL;
+"""
+
+# Notification events that can be batched when many arrive together
+_BATCH_EVENTS = frozenset({
+    'quarantine_cleared',
+    'quarantine_requeued',
+    'quarantine_no_results',
+    'incomplete_in_library_removed',
+})
+_BATCH_THRESHOLD = 3
+
+
+@contextmanager
+def _db():
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(DB_PATH), timeout=10, check_same_thread=False)
+    con.row_factory = sqlite3.Row
+    con.execute('PRAGMA journal_mode=WAL')
+    con.execute('PRAGMA busy_timeout=5000')
+    try:
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+# ── Schema init + JSON migration ──────────────────────────────────────────────
+
+def init_db():
+    """Create tables (idempotent) and migrate from legacy JSON files once."""
+    with _db() as con:
+        con.executescript(_SCHEMA)
+        _maybe_migrate(con)
+
+
+def _load_json_safe(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _maybe_migrate(con):
+    """Import legacy JSON state files into SQLite. Runs only once per DB."""
+    if con.execute(
+        "SELECT 1 FROM schema_version WHERE name='legacy_json_import'"
+    ).fetchone():
+        return
+
+    now = time.time()
+
+    # held_folders
+    for name, entry in _load_json_safe(_LEGACY['hold']).items():
+        if isinstance(entry, (int, float)):
+            entry = {'first_seen': float(entry)}
+        con.execute(
+            'INSERT OR IGNORE INTO held_folders VALUES (?,?,?,?,?)',
+            (name, entry.get('first_seen', now), entry.get('reason', ''),
+             entry.get('files_present', 0), now),
+        )
+
+    # fill_attempts
+    for name, entry in _load_json_safe(_LEGACY['fill']).items():
+        if isinstance(entry, dict):
+            con.execute(
+                'INSERT OR IGNORE INTO fill_attempts VALUES (?,?,?,?,?,?,?,?)',
+                (name, entry.get('last_queued', 0),
+                 json.dumps(entry.get('queued_tracks', [])),
+                 entry.get('queued_files', 0),
+                 entry.get('user', ''), entry.get('fmt', ''),
+                 entry.get('score', 0), now),
+            )
+
+    # quarantine_state
+    for key, entry in _load_json_safe(_LEGACY['quarantine']).items():
+        if isinstance(entry, dict):
+            con.execute(
+                'INSERT OR IGNORE INTO quarantine_state VALUES (?,?,?,?)',
+                (key, entry.get('last_attempt', 0), entry.get('last_queued', 0), now),
+            )
+
+    # incomplete_state
+    for name, entry in _load_json_safe(_LEGACY['incomplete']).items():
+        if isinstance(entry, dict):
+            con.execute(
+                'INSERT OR IGNORE INTO incomplete_state VALUES (?,?,?,?,?,?,?)',
+                (name, entry.get('first_seen', now),
+                 int(bool(entry.get('alerted', False))),
+                 int(bool(entry.get('requeued', False))),
+                 entry.get('last_search_time', 0),
+                 entry.get('requeue_time', ''), now),
+            )
+
+    # notify_queue — import any pending JSONL items
+    try:
+        for line in _LEGACY['notify'].read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+                payload = {k: v for k, v in e.items() if k not in ('event', 'folder', 'time')}
+                con.execute(
+                    'INSERT INTO notify_queue (event, folder, payload, created_at) VALUES (?,?,?,?)',
+                    (e.get('event', ''), e.get('folder', ''), json.dumps(payload), now - 1),
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    con.execute(
+        'INSERT OR REPLACE INTO schema_version (name, applied_at) VALUES (?, ?)',
+        ('legacy_json_import', now),
+    )
+
+
+# ── held_folders ──────────────────────────────────────────────────────────────
+
+def get_held_folders() -> dict:
+    """Return {folder_name: {first_seen, reason, files_present}}."""
+    with _db() as con:
+        rows = con.execute(
+            'SELECT folder_name, first_seen, reason, files_present FROM held_folders'
+        ).fetchall()
+    return {r['folder_name']: {
+        'first_seen':    r['first_seen'],
+        'reason':        r['reason'],
+        'files_present': r['files_present'],
+    } for r in rows}
+
+
+def upsert_held_folder(folder_name: str, first_seen: float, reason: str, files_present: int):
+    with _db() as con:
+        con.execute(
+            'INSERT INTO held_folders VALUES (?,?,?,?,?) '
+            'ON CONFLICT(folder_name) DO UPDATE SET '
+            'reason=excluded.reason, files_present=excluded.files_present, '
+            'updated_at=excluded.updated_at',
+            (folder_name, first_seen, reason, files_present, time.time()),
+        )
+
+
+def delete_held_folder(folder_name: str):
+    with _db() as con:
+        con.execute('DELETE FROM held_folders WHERE folder_name=?', (folder_name,))
+
+
+def prune_held_folders(keep: set) -> set:
+    """Delete entries whose folder_name is not in keep. Returns pruned names."""
+    with _db() as con:
+        existing = {r[0] for r in con.execute('SELECT folder_name FROM held_folders')}
+        stale = existing - keep
+        for name in stale:
+            con.execute('DELETE FROM held_folders WHERE folder_name=?', (name,))
+    return stale
+
+
+# ── fill_attempts ─────────────────────────────────────────────────────────────
+
+def get_fill_state() -> dict:
+    """Return {folder_name: {last_queued, queued_tracks, queued_files, user, fmt, score}}."""
+    with _db() as con:
+        rows = con.execute('SELECT * FROM fill_attempts').fetchall()
+    result = {}
+    for r in rows:
+        result[r['folder_name']] = {
+            'last_queued':   r['last_queued'],
+            'queued_tracks': json.loads(r['queued_tracks']),
+            'queued_files':  r['queued_files'],
+            'user':          r['source_user'],
+            'fmt':           r['source_fmt'],
+            'score':         r['source_score'],
+        }
+    return result
+
+
+def upsert_fill_attempt(folder_name: str, last_queued: float,
+                        queued_tracks: list, queued_files: int,
+                        user: str, fmt: str, score: int):
+    with _db() as con:
+        con.execute(
+            'INSERT INTO fill_attempts VALUES (?,?,?,?,?,?,?,?) '
+            'ON CONFLICT(folder_name) DO UPDATE SET '
+            'last_queued=excluded.last_queued, queued_tracks=excluded.queued_tracks, '
+            'queued_files=excluded.queued_files, source_user=excluded.source_user, '
+            'source_fmt=excluded.source_fmt, source_score=excluded.source_score, '
+            'updated_at=excluded.updated_at',
+            (folder_name, last_queued, json.dumps(queued_tracks),
+             queued_files, user, fmt, score, time.time()),
+        )
+
+
+# ── quarantine_state ──────────────────────────────────────────────────────────
+
+def get_quarantine_state() -> dict:
+    with _db() as con:
+        rows = con.execute(
+            'SELECT key, last_attempt, last_queued FROM quarantine_state'
+        ).fetchall()
+    return {r['key']: {'last_attempt': r['last_attempt'],
+                       'last_queued':  r['last_queued']} for r in rows}
+
+
+def upsert_quarantine_state(key: str, last_attempt: float, last_queued: float = 0):
+    with _db() as con:
+        con.execute(
+            'INSERT INTO quarantine_state VALUES (?,?,?,?) '
+            'ON CONFLICT(key) DO UPDATE SET '
+            'last_attempt=excluded.last_attempt, last_queued=excluded.last_queued, '
+            'updated_at=excluded.updated_at',
+            (key, last_attempt, last_queued, time.time()),
+        )
+
+
+def delete_quarantine_state(key: str):
+    with _db() as con:
+        con.execute('DELETE FROM quarantine_state WHERE key=?', (key,))
+
+
+def prune_quarantine_state(keep: set) -> set:
+    with _db() as con:
+        existing = {r[0] for r in con.execute('SELECT key FROM quarantine_state')}
+        stale = existing - keep
+        for k in stale:
+            con.execute('DELETE FROM quarantine_state WHERE key=?', (k,))
+    return stale
+
+
+# ── incomplete_state ──────────────────────────────────────────────────────────
+
+def get_incomplete_state() -> dict:
+    with _db() as con:
+        rows = con.execute('SELECT * FROM incomplete_state').fetchall()
+    return {r['folder_name']: {
+        'first_seen':       r['first_seen'],
+        'alerted':          bool(r['alerted']),
+        'requeued':         bool(r['requeued']),
+        'last_search_time': r['last_search_time'],
+        'requeue_time':     r['requeue_time'],
+    } for r in rows}
+
+
+def upsert_incomplete_state(folder_name: str, first_seen: float,
+                             alerted: bool = False, requeued: bool = False,
+                             last_search_time: float = 0, requeue_time: str = ''):
+    with _db() as con:
+        con.execute(
+            'INSERT INTO incomplete_state VALUES (?,?,?,?,?,?,?) '
+            'ON CONFLICT(folder_name) DO UPDATE SET '
+            'first_seen=excluded.first_seen, alerted=excluded.alerted, '
+            'requeued=excluded.requeued, last_search_time=excluded.last_search_time, '
+            'requeue_time=excluded.requeue_time, updated_at=excluded.updated_at',
+            (folder_name, first_seen, int(alerted), int(requeued),
+             last_search_time, requeue_time, time.time()),
+        )
+
+
+def delete_incomplete_state(folder_name: str):
+    with _db() as con:
+        con.execute('DELETE FROM incomplete_state WHERE folder_name=?', (folder_name,))
+
+
+def prune_incomplete_state(keep: set) -> set:
+    with _db() as con:
+        existing = {r[0] for r in con.execute('SELECT folder_name FROM incomplete_state')}
+        stale = existing - keep
+        for name in stale:
+            con.execute('DELETE FROM incomplete_state WHERE folder_name=?', (name,))
+    return stale
+
+
+# ── notify_queue ──────────────────────────────────────────────────────────────
+
+def push_notification(event: str, folder: str = '', **kwargs):
+    """Append a notification to the queue (non-blocking, safe for concurrent callers)."""
+    with _db() as con:
+        con.execute(
+            'INSERT INTO notify_queue (event, folder, payload, created_at) VALUES (?,?,?,?)',
+            (event, folder, json.dumps(kwargs), time.time()),
+        )
+
+
+def claim_notifications() -> list[tuple[dict, list[int]]]:
+    """
+    Read pending notifications and return [(notif, [row_ids]), ...] with batching.
+    Does NOT mark anything delivered — caller must call mark_delivered(ids) per
+    notif AFTER successful Telegram send. This guarantees at-least-once delivery
+    (rows stay pending if the bot crashes between claim and mark).
+
+    Events in _BATCH_EVENTS are collapsed into a summary dict when >= _BATCH_THRESHOLD;
+    the caller marks all underlying row ids together.
+    """
+    with _db() as con:
+        rows = con.execute(
+            'SELECT id, event, folder, payload FROM notify_queue '
+            'WHERE delivered_at IS NULL ORDER BY created_at'
+        ).fetchall()
+    if not rows:
+        return []
+
+    events = []
+    for r in rows:
+        try:
+            payload = json.loads(r['payload'])
+        except Exception:
+            payload = {}
+        events.append((r['id'], {'event': r['event'], 'folder': r['folder'], **payload}))
+
+    event_counts = Counter(e['event'] for _, e in events if e['event'] in _BATCH_EVENTS)
+    batched: dict[str, list] = defaultdict(list)
+    batched_ids: dict[str, list[int]] = defaultdict(list)
+    result: list[tuple[dict, list[int]]] = []
+
+    for rid, e in events:
+        ev = e['event']
+        if ev in _BATCH_EVENTS and event_counts[ev] >= _BATCH_THRESHOLD:
+            batched[ev].append(e)
+            batched_ids[ev].append(rid)
+        else:
+            result.append((e, [rid]))
+
+    for ev, group in batched.items():
+        result.append(
+            ({'event': f'{ev}_batch', 'count': len(group), 'items': group},
+             batched_ids[ev]),
+        )
+
+    return result
+
+
+def mark_delivered(ids: list[int]):
+    """Mark notify_queue rows delivered. Call only after successful send."""
+    if not ids:
+        return
+    now = time.time()
+    with _db() as con:
+        con.execute(
+            f'UPDATE notify_queue SET delivered_at=? WHERE id IN ({",".join("?"*len(ids))})',
+            [now, *ids],
+        )
+
+
+def drain_notifications() -> list[dict]:
+    """
+    DEPRECATED: legacy at-most-once API. Marks rows delivered before send,
+    so messages are lost on crash. Kept for backwards compat — prefer
+    claim_notifications() + mark_delivered().
+    """
+    claimed = claim_notifications()
+    all_ids: list[int] = []
+    for _, ids in claimed:
+        all_ids.extend(ids)
+    mark_delivered(all_ids)
+    return [notif for notif, _ in claimed]
+
+
+def prune_notify_queue(retain_days: int = 30) -> int:
+    """Delete delivered notify_queue rows older than retain_days. Returns row count."""
+    cutoff = time.time() - retain_days * 86400
+    with _db() as con:
+        cur = con.execute(
+            'DELETE FROM notify_queue WHERE delivered_at IS NOT NULL AND delivered_at < ?',
+            (cutoff,),
+        )
+        return cur.rowcount
+
+
+# ── wishlist ──────────────────────────────────────────────────────────────────
+
+def add_wishlist(artist: str, album: str, added_by: str = 'telegram') -> tuple[int, bool]:
+    """
+    Add an item to the wishlist.
+    Returns (id, is_new) — is_new=False means it was already there.
+    """
+    with _db() as con:
+        existing = con.execute(
+            'SELECT id FROM wishlist WHERE LOWER(artist)=LOWER(?) AND LOWER(album)=LOWER(?) '
+            'AND fulfilled_at IS NULL',
+            (artist, album),
+        ).fetchone()
+        if existing:
+            return existing['id'], False
+        cur = con.execute(
+            'INSERT INTO wishlist (artist, album, added_at, added_by) VALUES (?,?,?,?)',
+            (artist, album, time.time(), added_by),
+        )
+        return cur.lastrowid, True
+
+
+def get_wishlist_pending() -> list[dict]:
+    with _db() as con:
+        rows = con.execute(
+            'SELECT id, artist, album, added_at, last_attempt, last_queued '
+            'FROM wishlist WHERE fulfilled_at IS NULL ORDER BY added_at'
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_wishlist_attempt(wid: int, last_attempt: float, last_queued: float | None = None):
+    with _db() as con:
+        if last_queued is not None:
+            con.execute(
+                'UPDATE wishlist SET last_attempt=?, last_queued=? WHERE id=?',
+                (last_attempt, last_queued, wid),
+            )
+        else:
+            con.execute('UPDATE wishlist SET last_attempt=? WHERE id=?', (last_attempt, wid))
+
+
+def fulfill_wishlist(wid: int):
+    with _db() as con:
+        con.execute('UPDATE wishlist SET fulfilled_at=? WHERE id=?', (time.time(), wid))
+
+
+def remove_wishlist(wid: int) -> bool:
+    with _db() as con:
+        cur = con.execute('DELETE FROM wishlist WHERE id=?', (wid,))
+        return cur.rowcount > 0
+
+
+# ── weekly digest helpers ─────────────────────────────────────────────────────
+
+def get_weekly_stats(beets_db_path: str = '/root/.config/beets/library.db') -> dict:
+    """
+    Pull stats for the past 7 days to build a weekly digest.
+    Returns dict with: new_albums, new_tracks, events_by_type, held, quarantine_count.
+    """
+    import sqlite3 as _sq
+    week_ago = time.time() - 7 * 86400
+    stats: dict = {
+        'new_albums':     [],
+        'new_tracks':     0,
+        'events_by_type': {},
+        'held':           [],
+        'quarantine_count': 0,
+    }
+
+    # New albums from beets
+    try:
+        con = _sq.connect(beets_db_path, timeout=10)
+        try:
+            con.row_factory = _sq.Row
+            rows = con.execute(
+                'SELECT albumartist, album, COUNT(*) AS cnt FROM items '
+                'WHERE added > ? GROUP BY albumartist, album ORDER BY MAX(added) DESC LIMIT 30',
+                (week_ago,),
+            ).fetchall()
+            stats['new_tracks'] = sum(r['cnt'] for r in rows)
+            stats['new_albums'] = [
+                {'artist': r['albumartist'] or '', 'album': r['album'] or '', 'tracks': r['cnt']}
+                for r in rows
+            ]
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+    # Events by type from notify_queue
+    with _db() as con:
+        rows = con.execute(
+            'SELECT event, COUNT(*) AS cnt FROM notify_queue '
+            'WHERE created_at > ? GROUP BY event',
+            (week_ago,),
+        ).fetchall()
+        stats['events_by_type'] = {r['event']: r['cnt'] for r in rows}
+
+        # Current hold state
+        held = con.execute(
+            'SELECT folder_name, first_seen FROM held_folders ORDER BY first_seen'
+        ).fetchall()
+        stats['held'] = [{'name': r['folder_name'],
+                          'age_h': round((time.time() - r['first_seen']) / 3600, 1)}
+                         for r in held]
+
+    return stats

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+import fcntl
 import importlib.util
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -12,16 +14,18 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, '/usr/local/bin')
+import pipeline_db
+
 RECOVER_PATH = "/usr/local/bin/slskd-recover.py"
 LOG_FILE = "/var/log/slskd-telegram-bot.log"
-STATE_DIR = Path("/var/lib/slskd-telegram-bot")
-OFFSET_FILE = STATE_DIR / "offset"
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-ALLOWED_CHAT_ID = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
-POLL_TIMEOUT = int(os.environ.get("TELEGRAM_POLL_TIMEOUT", "45"))
-POLL_WAIT = int(os.environ.get("TELEGRAM_POLL_WAIT", "2"))
-MAX_MSG_LEN = 3900
+TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+ALLOWED_CHAT_ID   = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
+POLL_TIMEOUT      = int(os.environ.get("TELEGRAM_POLL_TIMEOUT", "45"))
+POLL_WAIT         = int(os.environ.get("TELEGRAM_POLL_WAIT", "2"))
+OFFSET_FILE       = Path("/var/lib/slskd-telegram-bot/offset")
+MAX_MSG_LEN       = 3900
 
 if not TELEGRAM_TOKEN:
     raise SystemExit("TELEGRAM_BOT_TOKEN is required")
@@ -30,14 +34,13 @@ if not ALLOWED_CHAT_ID:
 
 API_BASE = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-
 _log_fh = None
 running = True
 
 
 def setup_logging():
     global _log_fh
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
     _log_fh = open(LOG_FILE, "a", encoding="utf-8")
 
 
@@ -60,22 +63,22 @@ def tg_get(method: str, params: dict):
 def tg_post(method: str, body: dict):
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
-        f"{API_BASE}/{method}",
-        data=data,
-        method="POST",
+        f"{API_BASE}/{method}", data=data, method="POST",
         headers={"Content-Type": "application/json", "Accept": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=20) as resp:
         return json.loads(resp.read())
 
 
-def send_message(chat_id: str, text: str):
+def send_message(chat_id: str, text: str) -> bool:
     if len(text) > MAX_MSG_LEN:
         text = text[: MAX_MSG_LEN - 3] + "..."
     try:
         tg_post("sendMessage", {"chat_id": chat_id, "text": text})
+        return True
     except Exception as e:
         log(f"sendMessage failed: {e}", "WARN")
+        return False
 
 
 def load_offset() -> int:
@@ -86,40 +89,290 @@ def load_offset() -> int:
 
 
 def save_offset(offset: int):
+    OFFSET_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = OFFSET_FILE.with_suffix(".tmp")
     tmp.write_text(str(offset), encoding="utf-8")
     tmp.replace(OFFSET_FILE)
 
 
+# ── Notification rendering ────────────────────────────────────────────────────
+
+def _fmt_ts(ts: str) -> str:
+    return f"\n{ts}" if ts else ""
+
+
+def render_notification(notif: dict) -> tuple[str | None, str | None]:
+    """Return (log_msg, telegram_text) for a notification. None = skip."""
+    event  = notif.get("event", "")
+    folder = notif.get("folder", "?")
+    ts     = notif.get("time", "")
+
+    if event == "promoted":
+        files = notif.get("files", "?")
+        return (
+            f"Sent album notification: {folder}",
+            f"✅ Album download complete\n{folder}\nFiles: {files}{_fmt_ts(ts)}",
+        )
+
+    if event == "dedup_detected":
+        lib_tracks = notif.get("lib_tracks", "?")
+        artist     = notif.get("artist", "")
+        album      = notif.get("album", "")
+        label = f"{artist} - {album}" if artist else album
+        return (
+            f"Sent dedup-detected notification: {folder}",
+            f"⚠️ Duplicate detected\n{folder}\n"
+            f"Library already has {lib_tracks} track(s) for \"{label}\"\n"
+            f"Beets will merge/upgrade automatically.{_fmt_ts(ts)}",
+        )
+
+    if event == "escalated":
+        reason  = notif.get("reason", "?")
+        hold_h  = notif.get("hold_hours", "?")
+        return (
+            f"Sent escalation notification: {folder}",
+            f"⚠️ Incomplete album escalated to quarantine\n{folder}\n"
+            f"Held for: {hold_h}h\nReason: {reason}{_fmt_ts(ts)}",
+        )
+
+    if event == "incomplete_stalled":
+        stalled_h = notif.get("stalled_hours", "?")
+        audio     = notif.get("audio_files", "?")
+        return (
+            f"Sent stalled notification: {folder}",
+            f"⏳ Stalled incomplete download\n{folder}\n"
+            f"Stalled: {stalled_h}h | Files so far: {audio}\n"
+            f"Will auto-requeue at 48h, quarantine at 7d{_fmt_ts(ts)}",
+        )
+
+    if event == "incomplete_requeued":
+        files     = notif.get("files", "?")
+        user      = notif.get("user", "?")
+        score     = notif.get("score", "?")
+        stalled_h = notif.get("stalled_hours", "?")
+        return (
+            f"Sent requeue notification: {folder}",
+            f"↺ Re-queued stalled download\n{folder}\n"
+            f"Was stalled: {stalled_h}h\n"
+            f"User: {user} | Files: {files} | Score: {score}{_fmt_ts(ts)}",
+        )
+
+    if event == "incomplete_no_results":
+        query     = notif.get("query", "?")
+        stalled_h = notif.get("stalled_hours", "?")
+        return (
+            f"Sent no-results notification: {folder}",
+            f"❌ No requeue results\n{folder}\n"
+            f"Stalled: {stalled_h}h | Query tried: {query}\n"
+            f"Will quarantine at 7d{_fmt_ts(ts)}",
+        )
+
+    if event == "incomplete_quarantined":
+        stalled_h = notif.get("stalled_hours", "?")
+        audio     = notif.get("audio_files", "?")
+        return (
+            f"Sent quarantine notification: {folder}",
+            f"\U0001f5d1️ Incomplete download quarantined\n{folder}\n"
+            f"Stalled: {stalled_h}h | Files rescued: {audio}{_fmt_ts(ts)}",
+        )
+
+    if event == "beets_import_stuck":
+        cycles = notif.get("consecutive_cycles", "?")
+        return (
+            f"Sent beets-import-stuck notification: {folder}",
+            f"⚠️ Folder stuck in beets import\n{folder}\n"
+            f"Seen {cycles} consecutive 15-min cycles without being absorbed.\n"
+            f"Check beets log; may need manual import or quarantine.{_fmt_ts(ts)}",
+        )
+
+    if event == "healthcheck_alert":
+        message = notif.get("message", "pipeline health issue detected")
+        return (
+            "Sent healthcheck alert",
+            f"\U0001f6a8 {message}{_fmt_ts(ts)}",
+        )
+
+    if event == "fill_queued":
+        tracks       = notif.get("tracks", [])
+        files        = notif.get("files", "?")
+        user         = notif.get("user", "?")
+        fmt          = notif.get("fmt", "?")
+        score        = notif.get("score", "?")
+        missing_total = notif.get("missing_total", "?")
+        return (
+            f"Sent fill-queued notification: {folder}",
+            f"\U0001f9e9 Filling missing tracks\n{folder}\n"
+            f"Queuing {files} file(s) for tracks {tracks}\n"
+            f"({files} of {missing_total} missing) | {fmt} | {user} | score {score}{_fmt_ts(ts)}",
+        )
+
+    if event == "fill_no_results":
+        missing = notif.get("missing", [])
+        query   = notif.get("query", "?")
+        return (
+            f"Sent fill-no-results notification: {folder}",
+            f"❌ No results for missing tracks\n{folder}\n"
+            f"Missing: {missing}\nQuery tried: {query}{_fmt_ts(ts)}",
+        )
+
+    if event == "quarantine_requeued":
+        user  = notif.get("user", "?")
+        fmt   = notif.get("fmt", "?")
+        files = notif.get("files", "?")
+        score = notif.get("score", "?")
+        return (
+            f"Sent quarantine-requeued notification: {folder}",
+            f"↺ Quarantine re-queued\n{folder}\n"
+            f"User: {user} | {fmt} | {files} files | score {score}{_fmt_ts(ts)}",
+        )
+
+    if event == "quarantine_cleared":
+        lib_tracks = notif.get("lib_tracks", "?")
+        return (
+            f"Sent quarantine-cleared notification: {folder}",
+            f"✅ Quarantine cleared — already in library\n{folder}\n"
+            f"Library tracks found: {lib_tracks}{_fmt_ts(ts)}",
+        )
+
+    if event == "quarantine_no_results":
+        query = notif.get("query", "?")
+        return (
+            f"Sent quarantine-no-results notification: {folder}",
+            f"❌ Quarantine re-queue: no results\n{folder}\n"
+            f"Query tried: {query}\nWill retry in 7 days{_fmt_ts(ts)}",
+        )
+
+    if event == "wishlist_queued":
+        artist = notif.get("artist", "")
+        album  = notif.get("album", "")
+        user   = notif.get("user", "?")
+        fmt    = notif.get("fmt", "?")
+        return (
+            f"Sent wishlist-queued notification: {artist} - {album}",
+            f"\U0001f31f Wishlist item found & queued!\n{artist} - {album}\n"
+            f"User: {user} | Format: {fmt}{_fmt_ts(ts)}",
+        )
+
+    if event == "wishlist_no_results":
+        artist = notif.get("artist", "")
+        album  = notif.get("album", "")
+        return (
+            f"Sent wishlist-no-results: {artist} - {album}",
+            None,   # silent — daily no-results are noise; digest covers this
+        )
+
+    # Batched events ──────────────────────────────────────────────────────────
+
+    if event == "quarantine_requeued_batch":
+        count = notif.get("count", "?")
+        items = notif.get("items", [])
+        names = "\n".join(f"  • {i.get('folder', '?')}" for i in items[:8])
+        extra = f"\n  … and {len(items) - 8} more" if len(items) > 8 else ""
+        return (
+            f"Sent quarantine-requeued-batch: {count} items",
+            f"↺ Quarantine sweep: {count} re-queued\n{names}{extra}",
+        )
+
+    if event == "quarantine_cleared_batch":
+        count = notif.get("count", "?")
+        items = notif.get("items", [])
+        names = "\n".join(f"  • {i.get('folder', '?')}" for i in items[:8])
+        extra = f"\n  … and {len(items) - 8} more" if len(items) > 8 else ""
+        return (
+            f"Sent quarantine-cleared-batch: {count} items",
+            f"✅ Quarantine sweep: {count} cleared (already in library)\n{names}{extra}",
+        )
+
+    if event == "quarantine_no_results_batch":
+        count = notif.get("count", "?")
+        return (
+            f"Sent quarantine-no-results-batch: {count} items",
+            f"❌ Quarantine sweep: {count} items — no results found, will retry in 7 days",
+        )
+
+    if event == "incomplete_in_library_removed_batch":
+        count = notif.get("count", "?")
+        return (
+            f"Sent in-library-removed-batch: {count} items",
+            f"✅ Cleanup: {count} incomplete folders removed (already in library)",
+        )
+
+    if event == "weekly_digest":
+        new_albums     = notif.get("new_albums", [])
+        new_tracks     = notif.get("new_tracks", 0)
+        held           = notif.get("held", [])
+        events_by_type = notif.get("events_by_type", {})
+
+        lines = [f"\U0001f4c5 Weekly pipeline digest"]
+        lines.append(f"\nImports (last 7 days): {len(new_albums)} albums, {new_tracks} tracks")
+
+        if new_albums:
+            for alb in new_albums[:8]:
+                lines.append(f"  • {alb.get('artist', '')} – {alb.get('album', '')} ({alb.get('tracks', '?')} trk)")
+            if len(new_albums) > 8:
+                lines.append(f"  … and {len(new_albums) - 8} more")
+
+        promoted  = events_by_type.get("promoted", 0)
+        escalated = events_by_type.get("escalated", 0)
+        filled    = events_by_type.get("fill_queued", 0)
+        if promoted or escalated or filled:
+            lines.append(f"\nPipeline activity:")
+            if promoted:
+                lines.append(f"  Promoted: {promoted}")
+            if filled:
+                lines.append(f"  Fill attempts: {filled}")
+            if escalated:
+                lines.append(f"  Escalated to quarantine: {escalated}")
+
+        if held:
+            lines.append(f"\nStill held ({len(held)}):")
+            for h in held[:5]:
+                lines.append(f"  • {h['name']} ({h['age_h']:.0f}h)")
+            if len(held) > 5:
+                lines.append(f"  … and {len(held) - 5} more")
+
+        return (
+            f"Sent weekly digest: {len(new_albums)} albums, {new_tracks} tracks",
+            "\n".join(lines),
+        )
+
+    return None, None
+
+
+# ── Command handling ──────────────────────────────────────────────────────────
+
 def load_recover_module():
-    spec = importlib.util.spec_from_file_location("slskd_recover", RECOVER_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load module at {RECOVER_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    try:
+        spec = importlib.util.spec_from_file_location("slskd_recover", RECOVER_PATH)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"cannot locate spec for {RECOVER_PATH}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception as e:
+        log(f"Failed to load recover module: {e}", "ERROR")
+        return None
 
 
 def parse_album_query(text: str):
     text = text.strip()
     if not text:
         return None, None, "Empty message. Use: Artist - Album"
-
     if text.startswith("/"):
         return None, None, None
-
     if " - " not in text:
         return None, None, "Use format: Artist - Album"
-
     artist, album = text.split(" - ", 1)
     artist = artist.strip()
-    album = album.strip()
+    album  = album.strip()
     if not artist or not album:
         return None, None, "Use format: Artist - Album"
     return artist, album, None
 
 
 def process_query(rec, artist: str, album: str):
+    if rec is None:
+        return False, "recover module unavailable — check server logs."
     label = f"{artist} - {album}"
     query = f"{artist} {album}".strip()
     if len(query) > 60:
@@ -127,13 +380,10 @@ def process_query(rec, artist: str, album: str):
 
     pending = rec.pending_download_count()
     if pending >= rec.MAX_PENDING_DL:
-        return (
-            False,
-            f"Queue is busy ({pending}/{rec.MAX_PENDING_DL}). Try again in a few minutes.",
-        )
+        return False, f"Queue is busy ({pending}/{rec.MAX_PENDING_DL}). Try again in a few minutes."
 
     n_existing = rec.count_existing_tracks(artist, album)
-    responses = rec.slskd_search(query)
+    responses  = rec.slskd_search(query)
     if responses is None:
         return False, f"Search error for: {label}"
     if not responses:
@@ -169,12 +419,75 @@ def process_query(rec, artist: str, album: str):
     return True, msg
 
 
-def handle_message(rec, update: dict):
+def _time_ago(ts: float | None) -> str:
+    if not ts:
+        return "never"
+    delta = time.time() - ts
+    if delta < 3600:
+        return f"{int(delta/60)}m ago"
+    if delta < 86400:
+        return f"{int(delta/3600)}h ago"
+    return f"{int(delta/86400)}d ago"
+
+
+def handle_wishlist_command(chat_id: str, args: str):
+    """Handle /wish [add | remove N | Artist - Album]"""
+    args = args.strip()
+
+    # /wish (no args) → list
+    if not args or args in ("list", "ls"):
+        items = pipeline_db.get_wishlist_pending()
+        if not items:
+            send_message(chat_id, "\U0001f4cb Wishlist is empty.\n\nAdd items with: /wish Artist - Album")
+            return
+
+        lines = [f"\U0001f4cb Wishlist ({len(items)} items):"]
+        for item in items:
+            added   = _time_ago(item['added_at'])
+            queued  = f", queued {_time_ago(item['last_queued'])}" if item.get('last_queued') else ""
+            tried   = f", tried {_time_ago(item['last_attempt'])}" if item.get('last_attempt') else ""
+            status  = queued or tried or ", not yet searched"
+            lines.append(f"  {item['id']}. {item['artist']} - {item['album']} ({added}{status})")
+        send_message(chat_id, "\n".join(lines))
+        return
+
+    # /wish remove N or /wish done N
+    m = re.match(r'^(?:remove|rm|done|del)\s+(\d+)$', args, re.IGNORECASE)
+    if m:
+        wid = int(m.group(1))
+        ok  = pipeline_db.remove_wishlist(wid)
+        send_message(chat_id, f"Removed wishlist item #{wid}." if ok
+                     else f"No wishlist item with id {wid}.")
+        return
+
+    # /wish Artist - Album
+    if " - " not in args:
+        send_message(chat_id, "Use: /wish Artist - Album\nOr: /wish remove N")
+        return
+
+    artist, album = args.split(" - ", 1)
+    artist = artist.strip()
+    album  = album.strip()
+    if not artist or not album:
+        send_message(chat_id, "Use: /wish Artist - Album")
+        return
+
+    wid, is_new = pipeline_db.add_wishlist(artist, album)
+    if is_new:
+        send_message(chat_id,
+                     f"\U0001f31f Added to wishlist: {artist} - {album} (id={wid})\n"
+                     f"I'll search for it daily.")
+        log(f"Wishlist add #{wid}: {artist} - {album}")
+    else:
+        send_message(chat_id, f"Already on wishlist: {artist} - {album} (id={wid})")
+
+
+def handle_message(update: dict):
     msg = update.get("message") or update.get("edited_message")
     if not msg:
         return
 
-    chat = msg.get("chat", {})
+    chat    = msg.get("chat", {})
     chat_id = str(chat.get("id", ""))
     if not chat_id:
         return
@@ -190,7 +503,14 @@ def handle_message(rec, update: dict):
     if text in ("/start", "/help"):
         send_message(
             chat_id,
-            "Send album requests as:\nArtist - Album\n\nExample:\nMassive Attack - Mezzanine\n\nCommands:\n/scan — trigger beets import now",
+            "Music pipeline bot\n\n"
+            "Queue an album:\n  Artist - Album\n\n"
+            "Commands:\n"
+            "  /scan — trigger beets import now\n"
+            "  /wish Artist - Album — add to wishlist\n"
+            "  /wish — show wishlist\n"
+            "  /wish remove N — remove wishlist item\n"
+            "  /status — pipeline status summary",
         )
         return
 
@@ -204,13 +524,34 @@ def handle_message(rec, update: dict):
         else:
             subprocess.Popen(
                 ["systemctl", "start", "beets-import.service"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
             )
             send_message(chat_id, "Beets import scan triggered.")
             log("Manual scan triggered via Telegram")
         return
+
+    if text == "/status":
+        held   = pipeline_db.get_held_folders()
+        wish   = pipeline_db.get_wishlist_pending()
+        lines  = ["\U0001f4ca Pipeline status"]
+        if held:
+            lines.append(f"\n\U0001f551 Held folders ({len(held)}):")
+            for name, entry in sorted(held.items()):
+                age_h = (time.time() - entry['first_seen']) / 3600
+                lines.append(f"  • {name} ({age_h:.0f}h)")
+        else:
+            lines.append("✅ No folders held")
+        if wish:
+            lines.append(f"\n\U0001f31f Wishlist: {len(wish)} pending item(s)")
+        send_message(chat_id, "\n".join(lines))
+        return
+
+    if text.startswith("/wish"):
+        handle_wishlist_command(chat_id, text[5:].strip())
+        return
+
+    if text.startswith("/"):
+        return  # unknown command — ignore
 
     artist, album, err = parse_album_query(text)
     if err:
@@ -221,9 +562,12 @@ def handle_message(rec, update: dict):
 
     send_message(chat_id, f"Searching and scoring: {artist} - {album}")
     try:
+        rec = load_recover_module()
         ok, result = process_query(rec, artist, album)
         send_message(chat_id, result)
-        log(f"Request '{artist} - {album}' -> {'queued' if ok else 'not queued'}")
+        outcome = "queued" if ok else "not queued"
+        first_line = result.splitlines()[0] if result else ""
+        log(f"Request '{artist} - {album}' -> {outcome}: {first_line}")
     except Exception as e:
         log(f"Unhandled processing error: {e}\n{traceback.format_exc()}", "ERROR")
         send_message(chat_id, "Unexpected error while processing request. Check server logs.")
@@ -235,12 +579,36 @@ def handle_signal(signum, _frame):
     log(f"Received signal {signum}, shutting down")
 
 
+_INSTANCE_LOCK = None
+
+
+def acquire_instance_lock():
+    """Single-instance guard. Prevents two overlapping bots from double-draining notifications."""
+    global _INSTANCE_LOCK
+    lock_path = "/var/lib/slskd-telegram-bot/bot.lock"
+    Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "w")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit(f"Another slskd-telegram-bot instance holds {lock_path}; refusing to start")
+    fh.write(f"{os.getpid()}\n")
+    fh.flush()
+    _INSTANCE_LOCK = fh  # keep open for process lifetime
+
+
 def main():
     setup_logging()
-    rec = load_recover_module()
+    acquire_instance_lock()
+    pipeline_db.init_db()
+
+    if load_recover_module() is None:
+        log("WARNING: recover module failed to load at startup", "WARN")
+    else:
+        log("recover module loaded OK at startup")
     log("slskd-telegram-bot started")
 
-    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGINT,  handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
     offset = load_offset()
@@ -250,7 +618,7 @@ def main():
                 "getUpdates",
                 {
                     "timeout": POLL_TIMEOUT,
-                    "offset": offset,
+                    "offset":  offset,
                     "allowed_updates": json.dumps(["message", "edited_message"]),
                 },
             )
@@ -264,7 +632,22 @@ def main():
                 if isinstance(upd_id, int):
                     offset = max(offset, upd_id + 1)
                     save_offset(offset)
-                handle_message(rec, upd)
+                handle_message(upd)
+
+            # ── Drain and deliver notifications ───────────────────────────────
+            # Two-phase: claim (does NOT mark delivered), send, then mark delivered.
+            # On crash between claim and mark, rows stay pending and are retried.
+            for notif, ids in pipeline_db.claim_notifications():
+                log_msg, tg_text = render_notification(notif)
+                sent = True
+                if tg_text:
+                    sent = send_message(ALLOWED_CHAT_ID, tg_text)
+                if sent:
+                    pipeline_db.mark_delivered(ids)
+                    if log_msg:
+                        log(log_msg)
+                else:
+                    log(f"Notification send failed; will retry: {notif.get('event')}", "WARN")
 
         except urllib.error.HTTPError as e:
             log(f"Telegram HTTPError {e.code}: {e.read().decode(errors='replace')}", "WARN")

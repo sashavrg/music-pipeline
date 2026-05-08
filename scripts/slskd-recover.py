@@ -28,6 +28,9 @@ from dataclasses import dataclass
 from pathlib import PureWindowsPath
 from typing import Optional
 
+sys.path.insert(0, '/usr/local/bin')
+import pipeline_db
+
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 SLSKD_URL        = "http://localhost:5030"
@@ -99,9 +102,7 @@ def setup_logging():
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 def api_get(path: str):
-    req = urllib.request.Request(
-        SLSKD_URL + path, headers={"Accept": "application/json"}
-    )
+    req = urllib.request.Request(SLSKD_URL + path, headers=pipeline_db.slskd_headers())
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read())
 
@@ -109,7 +110,7 @@ def api_post(path: str, body) -> Optional[dict]:
     data = json.dumps(body).encode()
     req = urllib.request.Request(
         SLSKD_URL + path, data=data, method="POST",
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers=pipeline_db.slskd_headers({"Content-Type": "application/json"}),
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -119,7 +120,9 @@ def api_post(path: str, body) -> Optional[dict]:
         raise RuntimeError(f"HTTP {e.code} on POST {path}: {e.read().decode(errors='replace')}") from e
 
 def api_delete(path: str):
-    req = urllib.request.Request(SLSKD_URL + path, method="DELETE")
+    req = urllib.request.Request(
+        SLSKD_URL + path, method="DELETE", headers=pipeline_db.slskd_headers(),
+    )
     try:
         urllib.request.urlopen(req, timeout=10).close()
     except Exception:
@@ -215,7 +218,7 @@ def parse_lost_albums(filepath: str) -> list[tuple[str, str]]:
 def _beets_paths(artist: str, album: str) -> list[str]:
     """Query beets library.db for tracks matching artist+album."""
     try:
-        conn = sqlite3.connect(BEETS_DB)
+        conn = sqlite3.connect(BEETS_DB, timeout=10)
         conds, params = [], []
         if artist:
             conds.append("(LOWER(albumartist) LIKE ? OR LOWER(artist) LIKE ?)")
@@ -285,11 +288,23 @@ def count_existing_tracks(artist: str, album: str) -> int:
 
 # ── slskd search ──────────────────────────────────────────────────────────────
 
+_QUERY_STRIP_RE = re.compile(r"[',&\"\(\)\[\]\{\}/\\]+")
+
+def _sanitize_query(query: str) -> str:
+    """slskd's EF Core layer raises optimistic-concurrency errors on queries
+    containing apostrophes, commas, and similar punctuation, returning 0
+    responses for searches that would otherwise succeed. Strip them before
+    sending."""
+    cleaned = _QUERY_STRIP_RE.sub(" ", query)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def slskd_search(query: str) -> Optional[list]:
     """
     Submit a search and poll until complete (or timeout).
     Returns list of response objects, or None on API error.
     """
+    query = _sanitize_query(query)
     try:
         result = api_post("/api/v0/searches", {
             "searchText":               query,
@@ -414,6 +429,51 @@ def find_best_folder(responses: list) -> Optional[FolderResult]:
             )
 
     return best
+
+
+def find_all_folders(responses: list) -> list:
+    """Return all qualifying FolderResult objects sorted by score desc.
+    Used for multi-source filling where different peers may have different tracks."""
+    results = []
+    seen: set[tuple[str, str]] = set()
+
+    for resp in responses:
+        username     = resp.get("username", "")
+        upload_speed = resp.get("uploadSpeed", 0)
+        files        = resp.get("files", [])
+
+        if upload_speed < MIN_UPLOAD_SPEED:
+            continue
+
+        folders: dict[str, list] = {}
+        for f in files:
+            d = str(PureWindowsPath(f.get("filename", "")).parent)
+            folders.setdefault(d, []).append(f)
+
+        for directory, dir_files in folders.items():
+            key = (username, directory)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            audio = [f for f in dir_files if _ext(f.get("filename", "")) in FORMAT_SCORES]
+            if not audio:
+                continue
+
+            score = _score_folder(audio, upload_speed)
+            if score < 0:
+                continue
+
+            exts = [_ext(f.get("filename", "")) for f in audio]
+            fmt  = max(set(exts), key=exts.count)
+
+            results.append(FolderResult(
+                username=username, directory=directory, files=audio,
+                fmt=fmt, score=score, upload_speed=upload_speed,
+                file_count=len(audio),
+            ))
+
+    return sorted(results, key=lambda r: r.score, reverse=True)
 
 
 # ── Download queueing ─────────────────────────────────────────────────────────

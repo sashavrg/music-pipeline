@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import os
 import re
 import shutil
 import sqlite3
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -13,6 +15,7 @@ LIB_DB = "/root/.config/beets/library.db"
 LIB_ROOT = "/mnt/storage/share/media/music/music"
 QUARANTINE_UNPARSED = Path("/mnt/scratch/slskd/quarantine/unparsed")
 QUARANTINE_INCOMPLETE = Path("/mnt/scratch/slskd/quarantine/incomplete")
+PENDING_DELETIONS_DIR = Path("/var/lib/beets-import/pending-deletions")
 AUDIO_EXTS = {".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".alac", ".aiff", ".wma"}
 
 
@@ -60,7 +63,11 @@ def parse_int_first(v):
         return 0
     if isinstance(v, (list, tuple)):
         v = v[0] if v else ""
-    m = re.search(r"(\d+)", str(v))
+    s = str(v).strip()
+    # Handle vinyl-style track numbers: A1, B2, etc. — strip the side letter
+    if s and s[0].isalpha() and len(s) > 1 and s[1:].lstrip().isdigit():
+        s = s[1:].lstrip()
+    m = re.search(r"(\d+)", s)
     return int(m.group(1)) if m else 0
 
 
@@ -101,6 +108,9 @@ def parse_folder_guess(folder: Path):
 def fallback_track_from_filename(p: Path):
     stem = p.stem
     m = re.match(r"^\s*(\d{1,2})[\s._-]+(.+)$", stem)
+    if not m:
+        # Handle vinyl-style filenames: "A1 - Title", "B2 - Title"
+        m = re.match(r"^\s*[A-Za-z]\s*(\d{1,2})[\s._-]+(.+)$", stem)
     trk = int(m.group(1)) if m else 0
     title = m.group(2).strip() if m else stem
     fmt = p.suffix.lower().lstrip(".")
@@ -202,19 +212,10 @@ def load_library_candidates(conn, artist_guess: str, album_guess: str):
     ag = norm(artist_guess)
     alb = norm(album_guess)
 
-    cur.execute(
-        """
-        SELECT i.id, i.path, i.title, i.track, i.disc, i.format, i.bitrate, i.samplerate, i.bitdepth,
-               COALESCE(a.albumartist, i.artist), i.album
-        FROM items i
-        LEFT JOIN albums a ON i.album_id = a.id
-        WHERE lower(i.album) LIKE ?
-        """,
-        (f"%{alb[:40]}%",),
-    )
-    rows.extend(cur.fetchall())
-
     if ag:
+        # Artist known: require both artist and album to match.
+        # Album-only LIKE is too broad — e.g. "shed" matches "vanished",
+        # "girlfriends" matches an unrelated EP with the same word.
         cur.execute(
             """
             SELECT i.id, i.path, i.title, i.track, i.disc, i.format, i.bitrate, i.samplerate, i.bitdepth,
@@ -225,6 +226,19 @@ def load_library_candidates(conn, artist_guess: str, album_guess: str):
               AND lower(i.album) LIKE ?
             """,
             (f"%{ag[:40]}%", f"%{alb[:40]}%"),
+        )
+        rows.extend(cur.fetchall())
+    else:
+        # Artist unknown: fall back to album-only search.
+        cur.execute(
+            """
+            SELECT i.id, i.path, i.title, i.track, i.disc, i.format, i.bitrate, i.samplerate, i.bitdepth,
+                   COALESCE(a.albumartist, i.artist), i.album
+            FROM items i
+            LEFT JOIN albums a ON i.album_id = a.id
+            WHERE lower(i.album) LIKE ?
+            """,
+            (f"%{alb[:40]}%",),
         )
         rows.extend(cur.fetchall())
 
@@ -268,12 +282,91 @@ def track_key(rec):
     return (int(rec.get("disc") or 0), int(rec.get("track") or 0), canon_title(rec.get("title") or "", rec.get("artist") or ""))
 
 
+def _plex_config():
+    """Read plex host/port/token/library from beets config.yaml."""
+    import yaml
+    cfg_path = os.path.expanduser("~/.config/beets/config.yaml")
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        plex = cfg.get("plex", {})
+        return {
+            "host":    plex.get("host", "localhost"),
+            "port":    plex.get("port", 32400),
+            "token":   plex.get("token", ""),
+            "library": plex.get("library_name", "Music"),
+        }
+    except Exception as e:
+        log(f"[WARN] could not read beets plex config: {e}")
+        return {}
+
+
+def _plex_section_id(host, port, token, library_name):
+    """Return the Plex section ID for library_name, or None."""
+    import urllib.request, urllib.parse
+    url = f"http://{host}:{port}/library/sections?X-Plex-Token={token}"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            import json as _json
+            data = _json.loads(resp.read())
+        for section in data.get("MediaContainer", {}).get("Directory", []):
+            if section.get("title") == library_name:
+                return section.get("key")
+    except Exception as e:
+        log(f"[WARN] could not fetch Plex sections: {e}")
+    return None
+
+
+def plex_refresh_dirs(dirs):
+    """
+    Trigger a targeted Plex partial scan for each directory in dirs.
+    Called after deleting old library files so Plex removes ghost entries
+    immediately rather than waiting for a full library rescan.
+    """
+    if not dirs:
+        return
+    cfg = _plex_config()
+    if not cfg.get("token"):
+        log("[WARN] no plex token in beets config — skipping Plex refresh")
+        return
+
+    host, port, token, library = cfg["host"], cfg["port"], cfg["token"], cfg["library"]
+    section_id = _plex_section_id(host, port, token, library)
+    if not section_id:
+        log(f"[WARN] could not find Plex section '{library}' — skipping refresh")
+        return
+
+    import urllib.request, urllib.parse
+    refreshed = 0
+    for d in sorted(dirs):
+        encoded = urllib.parse.quote(str(d), safe="")
+        url = (
+            f"http://{host}:{port}/library/sections/{section_id}"
+            f"/refresh?path={encoded}&X-Plex-Token={token}"
+        )
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                resp.read()
+            log(f"[PLEX] refreshed: {d}")
+            refreshed += 1
+        except Exception as e:
+            log(f"[WARN] Plex refresh failed for {d}: {e}")
+
+    log(f"[PLEX] triggered refresh on {refreshed}/{len(dirs)} album dir(s)")
+
+
 def delete_library_items(conn, items):
+    """Direct deletion — only called from apply-staged-deletions, not from process_folder."""
     cur = conn.cursor()
     deleted_ids = []
+    # Collect parent dirs before deletion so we can refresh Plex after
+    affected_dirs = set()
     for it in items:
         p = Path(it["path"])
         if str(p).startswith(LIB_ROOT) and p.exists():
+            affected_dirs.add(p.parent)
             try:
                 p.unlink()
             except Exception as e:
@@ -286,7 +379,33 @@ def delete_library_items(conn, items):
 
     cur.execute("DELETE FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM items WHERE album_id IS NOT NULL)")
     conn.commit()
+
+    # Notify Plex about each affected album directory so ghost entries are removed
+    plex_refresh_dirs(affected_dirs)
+
     return deleted_ids
+
+
+def stage_deletions(folder: Path, items: list, incoming_folder: Path):
+    """
+    Write items to a pending-deletions JSON file keyed by the incoming folder path.
+    The apply-staged-deletions script will consume this after beet import succeeds,
+    verifying the incoming folder was fully imported before touching library files.
+    """
+    PENDING_DELETIONS_DIR.mkdir(parents=True, exist_ok=True)
+    # Use a sanitised folder name as the filename so it's easy to audit
+    safe = re.sub(r"[^a-zA-Z0-9._-]", "_", incoming_folder.name)[:80]
+    ts = int(time.time())
+    dest = PENDING_DELETIONS_DIR / f"{safe}__{ts}.json"
+    payload = {
+        "incoming_folder": str(incoming_folder),
+        "staged_at": ts,
+        "items": items,
+    }
+    with open(dest, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, ensure_ascii=False)
+    log(f"[STAGE] {len(items)} item(s) staged for deferred deletion -> {dest.name}")
+    return dest
 
 
 def quarantine_unparsed(folder: Path):
@@ -329,7 +448,13 @@ def album_looks_incomplete(tracks):
     totals = [int(t.get("track_total") or 0) for t in tracks if int(t.get("track_total") or 0) > 0]
     expected = max(totals) if totals else 0
 
-    if expected > 0 and len(nums) < expected:
+    # Guard against inflated track_total from multi-disc box sets where every
+    # file carries the full set total (e.g. 73-track box set, this folder has
+    # disc 1 with 19 files). If track_total exceeds 3x the file count, the tag
+    # is likely a box-set total, not the per-disc total — skip tag-total check.
+    # Also skip when len(tracks) >= expected: all files are present even if
+    # bonus tracks renumber 1-N (flat expanded editions).
+    if expected > 0 and expected <= len(tracks) * 3 and len(nums) < expected and len(tracks) < expected:
         missing = [n for n in range(1, expected + 1) if n not in nums]
         return True, f"tag-total present={len(nums)}/{expected} missing={missing[:12]}"
 
@@ -372,17 +497,23 @@ def process_folder(conn, folder: Path):
     incoming_drop = []
     items_to_delete = {}
 
+    # Build album-indexed lookup for disc-flexibility fallback
+    # to avoid cross-album matching (e.g. "Fearless Flyers II" matching "III")
+    existing_by_album_track = defaultdict(list)
+    for c in cand:
+        existing_by_album_track[(norm(c.get("album") or ""), int(c.get("track") or 0))].append(c)
+
     for t in tracks:
         k = track_key(t)
         ex = existing_by_key.get(k, [])
 
         if not ex and t["track"] > 0:
             # disc flexibility: treat incoming disc 0 as wildcard; existing disc 0/1 equivalent for single-disc albums
+            # Use album-indexed lookup to avoid cross-album matching
             ex = [
                 x
-                for x in cand
-                if int(x.get("track") or 0) == int(t.get("track") or 0)
-                and (int(t.get("disc") or 0) == 0 or int(x.get("disc") or 0) in {0, int(t.get("disc") or 0)})
+                for x in existing_by_album_track.get((norm(t.get("album") or ""), int(t["track"])), [])
+                if int(t.get("disc") or 0) == 0 or int(x.get("disc") or 0) in {0, int(t.get("disc") or 0)}
             ]
 
         if not ex:
@@ -405,8 +536,30 @@ def process_folder(conn, folder: Path):
             has_upgrade = True
             items_to_delete[best_existing["id"]] = best_existing
         else:
+            # Only drop the incoming file if the matched library file ACTUALLY
+            # exists on disk. If the library DB path is stale (file was moved
+            # out-of-band, deleted manually, or never existed), dropping the
+            # incoming would lose the only copy on the filesystem.
+            lib_path = Path(best_existing.get("path") or "")
+            lib_path_exists = bool(lib_path) and lib_path.exists()
+            if not lib_path_exists:
+                # Treat as new — the library DB has a phantom row.
+                has_new = True
+                new_count += 1
+                log(
+                    f"[QUALITY-WARN] library DB row points to missing file: "
+                    f"{best_existing['path']!r} — keeping incoming "
+                    f"{Path(t['path']).name!r} for import (would have been dropped)"
+                )
+                continue
             downgrade_or_equal += 1
             incoming_drop.append(t['path'])
+            log(
+                f"[QUALITY-TRACE] not-better: incoming={Path(t['path']).name!r} "
+                f"matched library={Path(best_existing['path']).name!r} "
+                f"album={best_existing['album']!r} "
+                f"({(t.get('format') or '?').upper()} vs {(best_existing['format'] or '?').upper()})"
+            )
 
 
     # Drop incoming files that are not better than existing library copies.
@@ -436,11 +589,12 @@ def process_folder(conn, folder: Path):
         except Exception:
             return "skip-keep-incoming", len(tracks), 0, downgrade_or_equal, ""
 
-    deleted_count = 0
+    staged_count = 0
     if has_upgrade and items_to_delete:
-        deleted_count = len(delete_library_items(conn, list(items_to_delete.values())))
+        stage_deletions(folder, list(items_to_delete.values()), folder)
+        staged_count = len(items_to_delete)
 
-    return "keep-for-import", len(tracks), deleted_count, downgrade_or_equal, ""
+    return "keep-for-import", len(tracks), staged_count, downgrade_or_equal, ""
 
 
 def main():
@@ -460,7 +614,7 @@ def main():
         log("[INFO] no existing folders from clean-list")
         return 0
 
-    conn = sqlite3.connect(LIB_DB)
+    conn = sqlite3.connect(LIB_DB, timeout=10)
     kept = []
     stats = Counter()
 
@@ -476,7 +630,7 @@ def main():
             suffix = f" quarantine={extra}" if extra else ""
             log(
                 f"[QUALITY] folder={f} status={status} tracks={track_count} "
-                f"library_deleted={deleted_count} incoming_not_better={downgrade_or_equal}{suffix}"
+                f"library_staged={deleted_count} incoming_not_better={downgrade_or_equal}{suffix}"
             )
     finally:
         conn.close()
@@ -487,7 +641,7 @@ def main():
         f"input={len(folders)} kept={len(kept)} "
         f"skip_deleted={stats['skip-delete-incoming']} skip_kept={stats['skip-keep-incoming']} "
         f"quarantine_empty={stats['quarantine-empty']} quarantine_incomplete={stats['quarantine-incomplete']} "
-        f"library_deleted={stats['library_items_deleted']} tracks_seen={stats['tracks_seen']}"
+        f"library_staged={stats['library_items_deleted']} tracks_seen={stats['tracks_seen']}"
     )
     return 0
 
