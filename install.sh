@@ -32,7 +32,15 @@ required_vars=(
     PLEX_TOKEN
     SOULSEEK_USERNAME
     SOULSEEK_PASSWORD
+    SLSKD_WEB_USERNAME
+    SLSKD_WEB_PASSWORD
+    SLSKD_METRICS_USERNAME
+    SLSKD_METRICS_PASSWORD
 )
+# Reject the well-known upstream defaults — these are what GitGuardian flagged.
+for var in SLSKD_WEB_PASSWORD SLSKD_METRICS_PASSWORD; do
+    [[ "${!var:-}" == "slskd" ]] && die "$var is set to the upstream default 'slskd' — pick a strong password (e.g. openssl rand -base64 24)."
+done
 for var in "${required_vars[@]}"; do
     [[ -z "${!var:-}" ]] && die "Required variable not set in .env: $var"
 done
@@ -103,9 +111,10 @@ envsubst '$MUSIC_LIBRARY_ROOT $BEETS_CONFIG_DIR $DISCOGS_USER_TOKEN $PLEX_TOKEN 
 ok "beets config → $BEETS_CONFIG_DIR/config.yaml"
 
 # slskd config
-envsubst '$SOULSEEK_USERNAME $SOULSEEK_PASSWORD' \
+envsubst '$SOULSEEK_USERNAME $SOULSEEK_PASSWORD $SLSKD_WEB_USERNAME $SLSKD_WEB_PASSWORD $SLSKD_METRICS_USERNAME $SLSKD_METRICS_PASSWORD' \
     < "$REPO/config/slskd.yml.template" \
     > "$SLSKD_CONFIG_DIR/slskd.yml"
+chmod 600 "$SLSKD_CONFIG_DIR/slskd.yml"
 ok "slskd config → $SLSKD_CONFIG_DIR/slskd.yml"
 
 # telegram bot env

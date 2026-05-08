@@ -139,8 +139,8 @@ web:
   logging: false
   authentication:
     disabled: true
-    username: REDACTED
-    password: REDACTED
+    username: ${SLSKD_WEB_USERNAME}
+    password: ${SLSKD_WEB_PASSWORD}
     jwt:
       key: ~
       ttl: 604800000
@@ -173,8 +173,8 @@ metrics:
   url: /metrics
   authentication:
     disabled: false
-    username: REDACTED
-    password: REDACTED
+    username: ${SLSKD_METRICS_USERNAME}
+    password: ${SLSKD_METRICS_PASSWORD}
 feature:
   swagger: false
 soulseek:
