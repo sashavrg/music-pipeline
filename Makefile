@@ -1,25 +1,34 @@
 REPO         := $(shell pwd)
-SCRIPTS_DIR  := $(REPO)/scripts
+BIN_DIR      := $(REPO)/bin
 SYSTEMD_DIR  := $(REPO)/systemd
 DEPLOY_BIN   := /usr/local/bin
 DEPLOY_UNITS := /etc/systemd/system
 
-SCRIPTS := $(notdir $(wildcard $(SCRIPTS_DIR)/*.py) $(wildcard $(SCRIPTS_DIR)/*.sh))
+# Deployable entry points (host install): everything in bin/ — Python wrappers
+# AND bash scripts. The pipeline/ package itself stays in the repo at
+# /opt/music-pipeline/pipeline/ and is referenced by the wrappers via
+# MUSIC_PIPELINE_ROOT, so it does NOT get copied to /usr/local/bin/.
+SCRIPTS := $(notdir $(wildcard $(BIN_DIR)/*))
 UNITS   := $(notdir $(wildcard $(SYSTEMD_DIR)/*.service) $(wildcard $(SYSTEMD_DIR)/*.timer))
 
-.PHONY: help install deploy deploy-scripts deploy-units sync diff check restart status
+.PHONY: help install deploy deploy-scripts deploy-units sync diff check restart status docker-build docker-config
 
 help:
 	@echo "Music pipeline make targets:"
-	@echo "  make install         Run ./install.sh (full deploy: scripts + units + configs)"
-	@echo "  make deploy          Copy scripts and units only (no config regen, no restart)"
-	@echo "  make deploy-scripts  Copy scripts/* → $(DEPLOY_BIN)"
+	@echo "  make install         Run ./install.sh (full host deploy: bin/ + units + configs)"
+	@echo "  make deploy          Copy bin/* + systemd/* only (no config regen, no restart)"
+	@echo "  make deploy-scripts  Copy bin/* → $(DEPLOY_BIN)"
 	@echo "  make deploy-units    Copy systemd/* → $(DEPLOY_UNITS) and daemon-reload"
-	@echo "  make sync            Pull deployed scripts/units back into the repo (capture drift)"
+	@echo "  make sync            Pull deployed bin/units back into the repo (capture drift)"
 	@echo "  make diff            Show diffs between repo and deployed copies"
 	@echo "  make check           Exit non-zero if repo and deployed copies disagree"
 	@echo "  make restart         Restart the bot service"
 	@echo "  make status          Show timer + service status"
+	@echo "  make docker-build    Build the music-pipeline:latest image"
+	@echo "  make docker-config   Render docker compose config (validates compose.yml)"
+	@echo ""
+	@echo "Note: edits to pipeline/*.py take effect immediately — wrappers re-import"
+	@echo "every invocation. Only the bin/ wrappers and systemd units need deploy."
 
 install:
 	@[ "$$(id -u)" = "0" ] || { echo "install must run as root"; exit 1; }
@@ -29,8 +38,8 @@ deploy: deploy-scripts deploy-units
 
 deploy-scripts:
 	@[ "$$(id -u)" = "0" ] || { echo "deploy-scripts must run as root"; exit 1; }
-	install -m 755 $(SCRIPTS_DIR)/*.py $(SCRIPTS_DIR)/*.sh $(DEPLOY_BIN)/
-	@echo "Deployed $(words $(SCRIPTS)) script(s) → $(DEPLOY_BIN)"
+	install -m 755 $(BIN_DIR)/* $(DEPLOY_BIN)/
+	@echo "Deployed $(words $(SCRIPTS)) entry point(s) → $(DEPLOY_BIN)"
 
 deploy-units:
 	@[ "$$(id -u)" = "0" ] || { echo "deploy-units must run as root"; exit 1; }
@@ -43,7 +52,7 @@ deploy-units:
 sync:
 	@for f in $(SCRIPTS); do \
 	    if [ -f $(DEPLOY_BIN)/$$f ]; then \
-	        cp -p $(DEPLOY_BIN)/$$f $(SCRIPTS_DIR)/$$f; \
+	        cp -p $(DEPLOY_BIN)/$$f $(BIN_DIR)/$$f; \
 	    fi; \
 	done
 	@for u in $(UNITS); do \
@@ -56,7 +65,7 @@ sync:
 diff:
 	@for f in $(SCRIPTS); do \
 	    if [ -f $(DEPLOY_BIN)/$$f ]; then \
-	        diff -u $(SCRIPTS_DIR)/$$f $(DEPLOY_BIN)/$$f && echo "[ok] $$f" || true; \
+	        diff -u $(BIN_DIR)/$$f $(DEPLOY_BIN)/$$f && echo "[ok] $$f" || true; \
 	    else \
 	        echo "[missing in deploy] $$f"; \
 	    fi; \
@@ -72,8 +81,8 @@ diff:
 check:
 	@drift=0; \
 	for f in $(SCRIPTS); do \
-	    if [ ! -f $(DEPLOY_BIN)/$$f ] || ! cmp -s $(SCRIPTS_DIR)/$$f $(DEPLOY_BIN)/$$f; then \
-	        echo "DRIFT: scripts/$$f"; drift=1; \
+	    if [ ! -f $(DEPLOY_BIN)/$$f ] || ! cmp -s $(BIN_DIR)/$$f $(DEPLOY_BIN)/$$f; then \
+	        echo "DRIFT: bin/$$f"; drift=1; \
 	    fi; \
 	done; \
 	for u in $(UNITS); do \
@@ -90,3 +99,9 @@ status:
 	@systemctl list-timers '*pipeline*' '*beets*' '*slskd*' --no-pager 2>/dev/null || true
 	@echo
 	@systemctl --no-pager status slskd-telegram-bot.service 2>/dev/null | head -10 || true
+
+docker-build:
+	docker compose build
+
+docker-config:
+	docker compose config
