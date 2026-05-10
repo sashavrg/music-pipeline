@@ -1,14 +1,20 @@
 #!/bin/bash
 set -u
 
-LOG_FILE="/var/log/music-pipeline-health.log"
-BEETS_LOG="/var/log/beets-import.log"
-COMPLETE_DIR="/mnt/scratch/slskd/complete"
-INCOMPLETE_DIR="/mnt/scratch/slskd/incomplete"
-QUARANTINE_DIR="/mnt/scratch/slskd/quarantine"
+# Paths default to the historical host install when env is unset, so existing
+# deployments behave identically. Override via /etc/music-pipeline.env or container env.
+SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/scratch/slskd}"
+LOG_DIR="${LOG_DIR:-/var/log}"
+HEALTHCHECK_STATE_DIR="${HEALTHCHECK_STATE_DIR:-/var/lib/music-pipeline-healthcheck}"
+
+LOG_FILE="$LOG_DIR/music-pipeline-health.log"
+BEETS_LOG="$LOG_DIR/beets-import.log"
+COMPLETE_DIR="${SLSKD_COMPLETE_DIR:-$SCRATCH_ROOT/complete}"
+INCOMPLETE_DIR="${SLSKD_INCOMPLETE_DIR:-$SCRATCH_ROOT/incomplete}"
+QUARANTINE_DIR="${SLSKD_QUARANTINE_DIR:-$SCRATCH_ROOT/quarantine}"
 CHECKER="/usr/local/bin/check_chromaprint.py"
 IMPORTER="/usr/local/bin/beets-import.sh"
-WARN_STAMP="/var/lib/music-pipeline-healthcheck/warn-notified.stamp"
+WARN_STAMP="$HEALTHCHECK_STATE_DIR/warn-notified.stamp"
 WARN_COOLDOWN_H=24
 WARN_COUNT=0
 FAIL_COUNT=0
@@ -332,8 +338,8 @@ check_timer_active "slskd-quarantine-requeue.timer"
 check_timer_active "slskd-wishlist-check.timer"
 check_timer_active "pipeline-weekly-digest.timer"
 
-check_disk_threshold "/mnt/scratch" "scratch"
-check_disk_threshold "/mnt/storage" "storage"
+check_disk_threshold "${SCRATCH_DISK_MOUNT:-/mnt/scratch}" "scratch"
+check_disk_threshold "${STORAGE_DISK_MOUNT:-/mnt/storage}" "storage"
 
 check_recover_status
 check_beets_stale_runtime

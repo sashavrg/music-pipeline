@@ -27,26 +27,27 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, '/usr/local/bin')
+import pipeline_config as cfg
 import pipeline_db
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-INCOMPLETE_DIR     = Path('/mnt/scratch/slskd/incomplete')
-QUARANTINE_DIR     = Path('/mnt/scratch/slskd/quarantine/incomplete')
-LOG_FILE           = Path('/var/log/slskd-incomplete-watchdog.log')
+INCOMPLETE_DIR     = cfg.INCOMPLETE_DIR
+QUARANTINE_DIR     = cfg.QUARANTINE_INCOMPLETE_DIR
+LOG_FILE           = cfg.INCOMPLETE_WATCHDOG_LOG
 
-BEETS_DB           = '/root/.config/beets/library.db'
-LIBRARY_ROOT       = '/mnt/storage/share/media/music/music'
-SLSKD_URL          = 'http://localhost:5030'
+BEETS_DB           = cfg.BEETS_DB
+LIBRARY_ROOT       = str(cfg.LIBRARY_ROOT)
+SLSKD_URL          = cfg.SLSKD_URL
 
-ALERT_AFTER_H        = 6
-REQUEUE_AFTER_H      = 48
-QUARANTINE_AFTER_H   = 168    # 7 days
-SEARCH_COOLDOWN_H    = 24     # cooldown before first requeue search
-REREQUEUE_COOLDOWN_H = 72     # cooldown before retrying when prior requeue stalled too
+ALERT_AFTER_H        = cfg.ALERT_AFTER_H
+REQUEUE_AFTER_H      = cfg.REQUEUE_AFTER_H
+QUARANTINE_AFTER_H   = cfg.QUARANTINE_AFTER_H
+SEARCH_COOLDOWN_H    = cfg.SEARCH_COOLDOWN_H
+REREQUEUE_COOLDOWN_H = cfg.REREQUEUE_COOLDOWN_H
 
-MIN_UPLOAD_SPEED   = 2_000_000
-MAX_PENDING_DL     = 100
+MIN_UPLOAD_SPEED   = cfg.MIN_UPLOAD_SPEED
+MAX_PENDING_DL     = cfg.MAX_PENDING_DL
 
 FORMAT_SCORES = {
     'flac': 500, 'wav': 450, 'aiff': 450, 'aif': 450,

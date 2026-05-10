@@ -4,4 +4,5 @@ After=local-fs.target
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/etc/music-pipeline.env
 ExecStart=/usr/local/bin/music-pipeline-healthcheck.sh

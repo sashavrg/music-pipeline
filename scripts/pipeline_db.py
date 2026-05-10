@@ -22,10 +22,12 @@ from collections import Counter, defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_DIR  = Path('/var/lib/pipeline')
-DB_PATH = DB_DIR / 'pipeline.db'
+import pipeline_config as cfg
 
-SLSKD_API_KEY_PATH = Path('/etc/slskd-api.key')
+DB_DIR  = cfg.PIPELINE_STATE_DIR
+DB_PATH = cfg.PIPELINE_DB_PATH
+
+SLSKD_API_KEY_PATH = cfg.SLSKD_API_KEY_PATH
 _slskd_api_key_cache: str | None = None
 
 
@@ -548,7 +550,9 @@ def remove_wishlist(wid: int) -> bool:
 
 # ── weekly digest helpers ─────────────────────────────────────────────────────
 
-def get_weekly_stats(beets_db_path: str = '/root/.config/beets/library.db') -> dict:
+def get_weekly_stats(beets_db_path: str | None = None) -> dict:
+    if beets_db_path is None:
+        beets_db_path = cfg.BEETS_DB
     """
     Pull stats for the past 7 days to build a weekly digest.
     Returns dict with: new_albums, new_tracks, events_by_type, held, quarantine_count.

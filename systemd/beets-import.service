@@ -5,4 +5,5 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/etc/music-pipeline.env
 ExecStart=/usr/local/bin/beets-import.sh

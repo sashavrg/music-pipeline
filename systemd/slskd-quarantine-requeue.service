@@ -4,6 +4,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/etc/music-pipeline.env
 ExecStart=/usr/local/bin/slskd-quarantine-requeue.py
 StandardOutput=journal
 StandardError=journal

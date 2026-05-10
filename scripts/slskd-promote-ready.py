@@ -13,13 +13,14 @@ from pathlib import Path
 import mutagen
 
 sys.path.insert(0, '/usr/local/bin')
+import pipeline_config as cfg
 import pipeline_db
 
-PIPELINE_LOCK_PATH = '/var/lib/pipeline/ready-dir.lock'
+PIPELINE_LOCK_PATH = str(cfg.PIPELINE_LOCK_PATH)
 
 
 def acquire_pipeline_lock():
-    """Serialize against beets-import.sh; both touch /mnt/scratch/slskd/ready."""
+    """Serialize against beets-import.sh; both touch the ready/ dir."""
     Path(PIPELINE_LOCK_PATH).parent.mkdir(parents=True, exist_ok=True)
     fh = open(PIPELINE_LOCK_PATH, 'w')
     deadline = time.time() + 30
@@ -37,10 +38,10 @@ def acquire_pipeline_lock():
                 )
             time.sleep(0.5)
 
-SRC = Path('/mnt/scratch/slskd/complete')
-DST = Path('/mnt/scratch/slskd/ready')
-QUARANTINE_INCOMPLETE = Path('/mnt/scratch/slskd/quarantine/incomplete')
-BEETS_DB   = '/root/.config/beets/library.db'
+SRC = cfg.COMPLETE_DIR
+DST = cfg.READY_DIR
+QUARANTINE_INCOMPLETE = cfg.QUARANTINE_INCOMPLETE_DIR
+BEETS_DB   = cfg.BEETS_DB
 AUDIO_EXTS = {'.flac', '.mp3', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.alac', '.aiff', '.wma'}
 
 

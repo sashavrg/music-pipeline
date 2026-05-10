@@ -29,22 +29,23 @@ from pathlib import PureWindowsPath
 from typing import Optional
 
 sys.path.insert(0, '/usr/local/bin')
+import pipeline_config as cfg
 import pipeline_db
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-SLSKD_URL        = "http://localhost:5030"
-LOST_ALBUMS_FILE = "/mnt/storage/share/media/music/LOST_ALBUMS.md"
-BEETS_DB         = "/root/.config/beets/library.db"
-LOG_FILE         = "/var/log/slskd-recover.log"
-PROGRESS_FILE    = "/var/log/slskd-recover-progress.json"
+SLSKD_URL        = cfg.SLSKD_URL
+LOST_ALBUMS_FILE = cfg.LOST_ALBUMS_FILE
+BEETS_DB         = cfg.BEETS_DB
+LOG_FILE         = str(cfg.RECOVER_LOG)
+PROGRESS_FILE    = str(cfg.RECOVER_PROGRESS_FILE)
 
-MIN_UPLOAD_SPEED = 2_000_000   # bytes/s  — 2 MB/s floor
-MAX_PENDING_DL   = 100         # pause queueing above this many active transfers
-SEARCH_DELAY     = 10          # seconds between searches (be a good citizen)
-POLL_INTERVAL    = 4           # seconds between result-poll attempts
-SEARCH_TIMEOUT   = 35          # seconds before giving up on a search
-QUEUE_POLL_WAIT  = 30          # seconds to wait when download queue is full
+MIN_UPLOAD_SPEED = cfg.MIN_UPLOAD_SPEED   # bytes/s  — 2 MB/s floor
+MAX_PENDING_DL   = cfg.MAX_PENDING_DL     # pause queueing above this many active transfers
+SEARCH_DELAY     = cfg.SEARCH_DELAY       # seconds between searches (be a good citizen)
+POLL_INTERVAL    = cfg.POLL_INTERVAL      # seconds between result-poll attempts
+SEARCH_TIMEOUT   = cfg.SEARCH_TIMEOUT     # seconds before giving up on a search
+QUEUE_POLL_WAIT  = cfg.QUEUE_POLL_WAIT    # seconds to wait when download queue is full
 
 # Format priority scores. Anything scoring <= 0 is rejected outright.
 # MP3 score is conditional on bitrate check (size/length).
@@ -238,7 +239,7 @@ def _beets_paths(artist: str, album: str) -> list[str]:
     except Exception:
         return []
 
-LIBRARY_ROOT = "/mnt/storage/share/media/music/music"
+LIBRARY_ROOT = str(cfg.LIBRARY_ROOT)
 AUDIO_EXTS   = {".flac", ".mp3", ".opus", ".wav", ".aiff", ".aif", ".ape", ".wv", ".m4a", ".ogg"}
 
 def _fs_track_count(artist: str, album: str) -> int:
@@ -554,7 +555,7 @@ def main():
         return
 
     if do_report:
-        out = "/var/log/slskd-recover-missing.md"
+        out = str(cfg.RECOVER_MISSING_REPORT)
         not_found  = sorted(v["label"] for v in progress.values() if v.get("status") == "not_found")
         no_quality = sorted(v["label"] for v in progress.values() if v.get("status") == "no_quality")
         with open(out, "w") as f:

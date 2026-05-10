@@ -25,21 +25,22 @@ from dataclasses import replace as dc_replace
 from pathlib import Path
 
 sys.path.insert(0, '/usr/local/bin')
+import pipeline_config as cfg
 import pipeline_db
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-LOG_FILE        = Path('/var/log/slskd-fill-missing-tracks.log')
+LOG_FILE        = cfg.FILL_MISSING_LOG
 RECOVER_PATH    = '/usr/local/bin/slskd-recover.py'
 
 # Cooldown per folder after at least one successful queue attempt in this cycle.
-QUEUE_COOLDOWN_H = 12
+QUEUE_COOLDOWN_H = cfg.FILL_QUEUE_COOLDOWN_H
 
 # Minimum hold age before we try to fill — give slskd time to finish on its own.
-MIN_HOLD_AGE_H   = 2
+MIN_HOLD_AGE_H   = cfg.FILL_MIN_HOLD_AGE_H
 
-MAX_PENDING_DL   = 80
-MAX_SOURCES      = 5   # try at most this many peers per cycle
+MAX_PENDING_DL   = cfg.FILL_MAX_PENDING_DL
+MAX_SOURCES      = cfg.FILL_MAX_SOURCES   # try at most this many peers per cycle
 
 AUDIO_EXTS = {'.flac', '.mp3', '.m4a', '.aac', '.ogg', '.opus',
               '.wav', '.alac', '.aiff', '.wma', '.ape', '.wv'}

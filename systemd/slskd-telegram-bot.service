@@ -8,6 +8,7 @@ Type=simple
 User=root
 Group=root
 EnvironmentFile=/etc/default/slskd-telegram-bot
+EnvironmentFile=-/etc/music-pipeline.env
 ExecStart=/usr/local/bin/slskd-telegram-bot.py
 Restart=always
 RestartSec=5

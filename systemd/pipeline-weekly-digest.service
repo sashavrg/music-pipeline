@@ -1,0 +1,11 @@
+[Unit]
+Description=Push weekly pipeline digest to Telegram
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/music-pipeline.env
+EnvironmentFile=-/etc/default/slskd-telegram-bot
+ExecStart=/usr/local/bin/pipeline-weekly-digest.py
+StandardOutput=journal
+StandardError=journal

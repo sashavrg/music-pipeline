@@ -15,16 +15,17 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, '/usr/local/bin')
+import pipeline_config as cfg
 import pipeline_db
 
 RECOVER_PATH = "/usr/local/bin/slskd-recover.py"
-LOG_FILE = "/var/log/slskd-telegram-bot.log"
+LOG_FILE = str(cfg.TELEGRAM_BOT_LOG)
 
 TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 ALLOWED_CHAT_ID   = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
-POLL_TIMEOUT      = int(os.environ.get("TELEGRAM_POLL_TIMEOUT", "45"))
-POLL_WAIT         = int(os.environ.get("TELEGRAM_POLL_WAIT", "2"))
-OFFSET_FILE       = Path("/var/lib/slskd-telegram-bot/offset")
+POLL_TIMEOUT      = cfg.TELEGRAM_POLL_TIMEOUT
+POLL_WAIT         = cfg.TELEGRAM_POLL_WAIT
+OFFSET_FILE       = cfg.BOT_STATE_DIR / "offset"
 MAX_MSG_LEN       = 3900
 
 if not TELEGRAM_TOKEN:
@@ -585,7 +586,7 @@ _INSTANCE_LOCK = None
 def acquire_instance_lock():
     """Single-instance guard. Prevents two overlapping bots from double-draining notifications."""
     global _INSTANCE_LOCK
-    lock_path = "/var/lib/slskd-telegram-bot/bot.lock"
+    lock_path = str(cfg.BOT_STATE_DIR / "bot.lock")
     Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
     fh = open(lock_path, "w")
     try:

@@ -27,10 +27,13 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-LIB_DB               = "/root/.config/beets/library.db"
-LIB_ROOT             = "/mnt/storage/share/media/music/music"
-PENDING_DELETIONS_DIR = Path("/var/lib/beets-import/pending-deletions")
-LOG_FILE             = "/var/log/beets-import.log"
+sys.path.insert(0, "/usr/local/bin")
+import pipeline_config as cfg
+
+LIB_DB               = cfg.BEETS_DB
+LIB_ROOT             = str(cfg.LIBRARY_ROOT)
+PENDING_DELETIONS_DIR = cfg.PENDING_DELETIONS_DIR
+LOG_FILE             = str(cfg.BEETS_LOG)
 
 # If the incoming folder is still present this many hours after staging, warn loudly.
 STALE_HOURS = 2

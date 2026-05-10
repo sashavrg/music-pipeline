@@ -11,11 +11,15 @@ from pathlib import Path
 
 import mutagen
 
-LIB_DB = "/root/.config/beets/library.db"
-LIB_ROOT = "/mnt/storage/share/media/music/music"
-QUARANTINE_UNPARSED = Path("/mnt/scratch/slskd/quarantine/unparsed")
-QUARANTINE_INCOMPLETE = Path("/mnt/scratch/slskd/quarantine/incomplete")
-PENDING_DELETIONS_DIR = Path("/var/lib/beets-import/pending-deletions")
+import sys as _sys
+_sys.path.insert(0, "/usr/local/bin")
+import pipeline_config as cfg
+
+LIB_DB = cfg.BEETS_DB
+LIB_ROOT = str(cfg.LIBRARY_ROOT)
+QUARANTINE_UNPARSED = cfg.QUARANTINE_UNPARSED_DIR
+QUARANTINE_INCOMPLETE = cfg.QUARANTINE_INCOMPLETE_DIR
+PENDING_DELETIONS_DIR = cfg.PENDING_DELETIONS_DIR
 AUDIO_EXTS = {".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".alac", ".aiff", ".wma"}
 
 
@@ -556,7 +560,7 @@ def process_folder(conn, folder: Path):
                     same_file = lib_path.resolve() == incoming_path.resolve()
                 except Exception:
                     same_file = str(lib_path) == str(incoming_path)
-            in_scratch = lib_path_str.startswith("/mnt/scratch/")
+            in_scratch = lib_path_str.startswith(str(cfg.SCRATCH_ROOT))
 
             if not lib_path_exists or same_file or in_scratch:
                 # Treat as new — the library DB row is stale/self-referential.
@@ -567,7 +571,7 @@ def process_folder(conn, folder: Path):
                 elif same_file:
                     reason = "self-match (DB row points at incoming file — interrupted prior import)"
                 else:
-                    reason = "DB row points into /mnt/scratch/ (interrupted prior import)"
+                    reason = f"DB row points into {cfg.SCRATCH_ROOT}/ (interrupted prior import)"
                 log(
                     f"[QUALITY-WARN] phantom library match ({reason}): "
                     f"{lib_path_str!r} — keeping incoming "

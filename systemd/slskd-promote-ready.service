@@ -4,4 +4,5 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/etc/music-pipeline.env
 ExecStart=/usr/local/bin/slskd-promote-ready.py --min-age-minutes 10

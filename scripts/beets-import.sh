@@ -4,18 +4,26 @@
 
 set -u
 
-IMPORT_DIR="/mnt/scratch/slskd/ready"
-QUARANTINE_DIR="/mnt/scratch/slskd/quarantine"
+# Paths default to the historical host install when env is unset, so existing
+# deployments behave identically. Override via /etc/music-pipeline.env (loaded
+# by systemd EnvironmentFile=) or the container env.
+SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/scratch/slskd}"
+PIPELINE_STATE_DIR="${PIPELINE_STATE_DIR:-/var/lib/pipeline}"
+BEETS_IMPORT_STATE_DIR="${BEETS_IMPORT_STATE_DIR:-/var/lib/beets-import}"
+LOG_DIR="${LOG_DIR:-/var/log}"
+
+IMPORT_DIR="${SLSKD_READY_DIR:-$SCRATCH_ROOT/ready}"
+QUARANTINE_DIR="${SLSKD_QUARANTINE_DIR:-$SCRATCH_ROOT/quarantine}"
 CHECKER="/usr/local/bin/check_chromaprint.py"
 QUALITY_UPGRADER="/usr/local/bin/beets-quality-upgrade.py"
 STAGED_DELETIONS="/usr/local/bin/beets-apply-staged-deletions.py"
-LOOP_STATE_DIR="/var/lib/beets-import"
+LOOP_STATE_DIR="$BEETS_IMPORT_STATE_DIR"
 CLEAN_LIST="$LOOP_STATE_DIR/clean-dirs.txt"
-LOG="/var/log/beets-import.log"
+LOG="$LOG_DIR/beets-import.log"
 MIN_AGE_MINUTES=10
 LOOP_STATE_FILE="$LOOP_STATE_DIR/seen-folders.json"
 LOOP_WARN_THRESHOLD=3
-PIPELINE_LOCK="/var/lib/pipeline/ready-dir.lock"
+PIPELINE_LOCK="$PIPELINE_STATE_DIR/ready-dir.lock"
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"

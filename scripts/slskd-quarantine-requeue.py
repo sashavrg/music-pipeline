@@ -24,21 +24,22 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, '/usr/local/bin')
+import pipeline_config as cfg
 import pipeline_db
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-QUARANTINE_ROOT    = Path('/mnt/scratch/slskd/quarantine')
+QUARANTINE_ROOT    = cfg.QUARANTINE_DIR
 QUARANTINE_SUBDIRS = ['incomplete']
 SKIP_SUBDIRS       = {'unparsed'}
-BEETS_DB           = '/root/.config/beets/library.db'
-LIBRARY_ROOT       = '/mnt/storage/share/media/music/music'
+BEETS_DB           = cfg.BEETS_DB
+LIBRARY_ROOT       = str(cfg.LIBRARY_ROOT)
 RECOVER_PATH       = '/usr/local/bin/slskd-recover.py'
-LOG_FILE           = Path('/var/log/slskd-quarantine-requeue.log')
+LOG_FILE           = cfg.QUARANTINE_REQUEUE_LOG
 
 RETRY_COOLDOWN_H   = 168    # 7 days between search retries
 QUEUED_COOLDOWN_H  = 336    # 14 days cooldown after a successful queue
-MAX_PENDING_DL     = 80
+MAX_PENDING_DL     = cfg.FILL_MAX_PENDING_DL
 
 AUDIO_EXTS = {'.flac', '.mp3', '.m4a', '.aac', '.ogg', '.opus',
               '.wav', '.alac', '.aiff', '.wma', '.ape', '.wv'}
