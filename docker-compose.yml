@@ -1,0 +1,130 @@
+# music-pipeline — docker compose stack
+#
+# Brings up slskd alongside the pipeline services. Each "periodic" service uses
+# the `loop INTERVAL CMD` pattern (see docker/loop.sh) to replace the host's
+# systemd timers. Cadences match the host install:
+#
+#   promote-ready          every 3 min
+#   beets-import           every 15 min
+#   healthcheck            every 30 min
+#   incomplete-watchdog    every 30 min
+#   fill-missing-tracks    every 6 hours
+#   wishlist-check         daily (24h after start; on host it's 14:00)
+#   quarantine-requeue     weekly (7d after start; on host it's Sun 04:00)
+#   weekly-digest          weekly (7d after start; on host it's Sun 20:00)
+#   telegram-bot           long-running (Restart=always)
+#
+# Usage:
+#   1. cp .env.example .env  (fill in tokens + creds)
+#   2. set MUSIC_LIBRARY_ROOT on the host to where Plex reads the music library
+#   3. docker compose up -d
+#   4. (first time) docker compose logs -f telegram-bot   — confirm the bot is
+#      polling Telegram and your /status reply lands in the chat
+
+# ─── Shared service template ──────────────────────────────────────────────────
+x-pipeline-base: &pipeline-base
+  image: music-pipeline:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment:
+    SLSKD_URL: http://slskd:5030
+    # All paths inside the container default to /data/* (see docker-entrypoint.sh).
+    # Override here if you remap any volume.
+    SCRATCH_ROOT: /data/scratch
+    PIPELINE_STATE_DIR: /data/state
+    BEETS_CONFIG_DIR: /data/beets
+    MUSIC_LIBRARY_ROOT: /data/library
+    LOG_DIR: /data/logs
+    LOG_TO_STDOUT: "true"
+  volumes:
+    - scratch:/data/scratch
+    - state:/data/state
+    - beets:/data/beets
+    - logs:/data/logs
+    - ${MUSIC_LIBRARY_ROOT:-./library}:/data/library
+  networks: [pipeline]
+  depends_on:
+    slskd:
+      condition: service_started
+
+services:
+  # ─── slskd (upstream image) ──────────────────────────────────────────────────
+  slskd:
+    image: slskd/slskd:latest
+    container_name: slskd
+    restart: unless-stopped
+    ports:
+      - "${SLSKD_WEB_PORT:-5030}:5030"
+      - "${SLSKD_LISTEN_PORT:-50300}:50300"
+    volumes:
+      - ${SLSKD_CONFIG_DIR:-./config/slskd}:/app
+      - scratch:/data
+    env_file:
+      - .env
+    environment:
+      SLSKD_REMOTE_CONFIGURATION: "true"
+    networks: [pipeline]
+
+  # ─── Long-running services ───────────────────────────────────────────────────
+  telegram-bot:
+    <<: *pipeline-base
+    container_name: pipeline-telegram-bot
+    command: ["slskd-telegram-bot"]
+
+  # ─── Periodic services (loop INTERVAL CMD ...) ──────────────────────────────
+  promote-ready:
+    <<: *pipeline-base
+    container_name: pipeline-promote-ready
+    command: ["loop", "180", "slskd-promote-ready", "--min-age-minutes", "10"]
+
+  beets-import:
+    <<: *pipeline-base
+    container_name: pipeline-beets-import
+    command: ["loop", "900", "beets-import.sh"]
+
+  incomplete-watchdog:
+    <<: *pipeline-base
+    container_name: pipeline-incomplete-watchdog
+    command: ["loop", "1800", "slskd-incomplete-watchdog"]
+
+  fill-missing-tracks:
+    <<: *pipeline-base
+    container_name: pipeline-fill-missing-tracks
+    command: ["loop", "21600", "slskd-fill-missing-tracks"]    # 6h
+
+  quarantine-requeue:
+    <<: *pipeline-base
+    container_name: pipeline-quarantine-requeue
+    command: ["loop", "604800", "slskd-quarantine-requeue"]    # 7d
+
+  wishlist-check:
+    <<: *pipeline-base
+    container_name: pipeline-wishlist-check
+    command: ["loop", "86400", "slskd-wishlist-check"]         # 1d
+
+  weekly-digest:
+    <<: *pipeline-base
+    container_name: pipeline-weekly-digest
+    command: ["loop", "604800", "pipeline-weekly-digest"]      # 7d
+
+  healthcheck:
+    <<: *pipeline-base
+    container_name: pipeline-healthcheck
+    command: ["loop", "1800", "music-pipeline-healthcheck.sh"]
+
+# ─── Volumes ──────────────────────────────────────────────────────────────────
+# `scratch` is shared with slskd — that's how slskd's completed downloads reach
+# the pipeline's promote/import flow. The other volumes are pipeline-only.
+volumes:
+  scratch:
+  state:
+  beets:
+  logs:
+
+networks:
+  pipeline:
+    driver: bridge

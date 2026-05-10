@@ -11,14 +11,22 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "sasha" }]
 
-# Runtime deps. beets is intentionally listed but excluded from the host
-# install.sh path (we use the system beets there); the container Dockerfile
-# pip-installs everything fresh.
+# Runtime deps. The host install.sh deploys via wrapper scripts and does NOT
+# run `pip install` — host uses system beets / system mutagen / etc. So these
+# deps are only resolved when `pip install .` runs inside the container.
+#
+# `beets` is listed here for the container build; the chroma/fetchart/discogs/
+# lastgenre/lyrics plugins each pull in one or more of the extras below.
 dependencies = [
+    "beets",
     "mutagen",
     "pyacoustid",
     "pyyaml",
     "requests",
+    "beautifulsoup4",
+    "python3-discogs-client",
+    "pillow",
+    "pylast",
 ]
 
 [project.scripts]
