@@ -97,7 +97,7 @@ def log(msg: str, level: str = "INFO"):
 
 def setup_logging():
     global _log_fh
-    _log_fh = open(LOG_FILE, "a")
+    _log_fh = cfg.open_log_file(LOG_FILE)
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────

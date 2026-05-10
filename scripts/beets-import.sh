@@ -20,6 +20,7 @@ STAGED_DELETIONS="/usr/local/bin/beets-apply-staged-deletions.py"
 LOOP_STATE_DIR="$BEETS_IMPORT_STATE_DIR"
 CLEAN_LIST="$LOOP_STATE_DIR/clean-dirs.txt"
 LOG="$LOG_DIR/beets-import.log"
+case "${LOG_TO_STDOUT:-}" in 1|true|yes|on|TRUE|YES|ON) LOG=/dev/stdout ;; esac
 MIN_AGE_MINUTES=10
 LOOP_STATE_FILE="$LOOP_STATE_DIR/seen-folders.json"
 LOOP_WARN_THRESHOLD=3

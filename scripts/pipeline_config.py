@@ -33,6 +33,31 @@ def _int(key: str, default: int) -> int:
     return int(raw) if raw not in (None, "") else default
 
 
+def _bool(key: str, default: bool = False) -> bool:
+    raw = os.environ.get(key, "").strip().lower()
+    if raw == "":
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+def log_to_stdout() -> bool:
+    """When true, scripts skip writing to log files and rely on stdout (captured
+    by systemd journal on the host, by docker logs in a container)."""
+    return _bool("LOG_TO_STDOUT", default=False)
+
+
+def open_log_file(path):
+    """Returns an appendable file handle for `path`, or None when LOG_TO_STDOUT
+    is set. Each script's setup_logging() should: `_log_fh = cfg.open_log_file(LOG_FILE)`
+    and then guard writes with `if _log_fh:`. The log() function should always
+    print() to stdout regardless — that side stays the same in both modes."""
+    if log_to_stdout():
+        return None
+    from pathlib import Path as _P
+    _P(path).parent.mkdir(parents=True, exist_ok=True)
+    return open(path, "a", encoding="utf-8")
+
+
 # ─── Roots ──────────────────────────────────────────────────────────────────
 # Env var names align with .env.example so install.sh / docker-compose can pass
 # them through unchanged. Python code uses the shorter attribute names below.

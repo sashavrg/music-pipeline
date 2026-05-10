@@ -50,8 +50,7 @@ _log_fh = None
 
 def setup_logging():
     global _log_fh
-    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _log_fh = open(LOG_FILE, 'a', encoding='utf-8')
+    _log_fh = cfg.open_log_file(LOG_FILE)
 
 def log(msg: str, level: str = 'INFO'):
     ts = time.strftime('%Y-%m-%d %H:%M:%S')

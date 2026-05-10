@@ -9,6 +9,7 @@ HEALTHCHECK_STATE_DIR="${HEALTHCHECK_STATE_DIR:-/var/lib/music-pipeline-healthch
 
 LOG_FILE="$LOG_DIR/music-pipeline-health.log"
 BEETS_LOG="$LOG_DIR/beets-import.log"
+case "${LOG_TO_STDOUT:-}" in 1|true|yes|on|TRUE|YES|ON) LOG_FILE=/dev/stdout ;; esac
 COMPLETE_DIR="${SLSKD_COMPLETE_DIR:-$SCRATCH_ROOT/complete}"
 INCOMPLETE_DIR="${SLSKD_INCOMPLETE_DIR:-$SCRATCH_ROOT/incomplete}"
 QUARANTINE_DIR="${SLSKD_QUARANTINE_DIR:-$SCRATCH_ROOT/quarantine}"
