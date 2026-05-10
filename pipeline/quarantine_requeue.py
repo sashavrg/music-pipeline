@@ -14,7 +14,6 @@ For each album folder:
 State persisted in pipeline SQLite DB. Designed to run weekly (or on-demand).
 """
 
-import importlib.util
 import os
 import re
 import shutil
@@ -23,9 +22,9 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, '/usr/local/bin')
-import pipeline_config as cfg
-import pipeline_db
+from . import config as cfg
+from . import db as pipeline_db
+from . import recover
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -34,7 +33,6 @@ QUARANTINE_SUBDIRS = ['incomplete']
 SKIP_SUBDIRS       = {'unparsed'}
 BEETS_DB           = cfg.BEETS_DB
 LIBRARY_ROOT       = str(cfg.LIBRARY_ROOT)
-RECOVER_PATH       = '/usr/local/bin/slskd-recover.py'
 LOG_FILE           = cfg.QUARANTINE_REQUEUE_LOG
 
 RETRY_COOLDOWN_H   = 168    # 7 days between search retries
@@ -146,14 +144,6 @@ def audio_count(folder: Path) -> int:
 
 # ── slskd recover loader ──────────────────────────────────────────────────────
 
-def load_recover():
-    spec = importlib.util.spec_from_file_location('slskd_recover', RECOVER_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f'cannot load {RECOVER_PATH}')
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
 # ── Folder collection ─────────────────────────────────────────────────────────
 
 def collect_folders() -> list[tuple[Path, str]]:
@@ -177,12 +167,6 @@ def main():
     setup_logging()
     pipeline_db.init_db()
     log('===== slskd-quarantine-requeue start =====')
-
-    try:
-        rec = load_recover()
-    except Exception as e:
-        log(f'Failed to load slskd-recover module: {e}', 'ERROR')
-        return 1
 
     state  = pipeline_db.get_quarantine_state()
     now    = time.time()
@@ -240,13 +224,13 @@ def main():
         new_last_attempt = now
 
         try:
-            pending = rec.pending_download_count()
+            pending = recover.pending_download_count()
             if pending >= MAX_PENDING_DL:
                 log(f'[SEARCH-SKIP] queue busy ({pending}), skipping {key}')
                 pipeline_db.upsert_quarantine_state(key, new_last_attempt, last_queued)
                 continue
 
-            responses = rec.slskd_search(query)
+            responses = recover.slskd_search(query)
             if not responses:
                 log(f'[NO-RESULTS] {key}')
                 no_results += 1
@@ -254,7 +238,7 @@ def main():
                 pipeline_db.upsert_quarantine_state(key, new_last_attempt, last_queued)
                 continue
 
-            best = rec.find_best_folder(responses)
+            best = recover.find_best_folder(responses)
             if best is None:
                 log(f'[NO-QUALITY] {key} — results found but none passed quality filters')
                 no_results += 1
@@ -262,7 +246,7 @@ def main():
                 pipeline_db.upsert_quarantine_state(key, new_last_attempt, last_queued)
                 continue
 
-            ok = rec.queue_download(best)
+            ok = recover.queue_download(best)
             if ok:
                 new_last_queued = now
                 requeued += 1

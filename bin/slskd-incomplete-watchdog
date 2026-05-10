@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+"""Wrapper for pipeline.incomplete_watchdog. The package lives under MUSIC_PIPELINE_ROOT
+(default /opt/music-pipeline)."""
+import os, sys
+sys.path.insert(0, os.environ.get("MUSIC_PIPELINE_ROOT", "/opt/music-pipeline"))
+from pipeline.incomplete_watchdog import main
+sys.exit(main() or 0)

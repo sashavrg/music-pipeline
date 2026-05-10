@@ -6,6 +6,6 @@ After=network-online.target
 Type=oneshot
 EnvironmentFile=-/etc/music-pipeline.env
 EnvironmentFile=-/etc/default/slskd-telegram-bot
-ExecStart=/usr/local/bin/pipeline-weekly-digest.py
+ExecStart=/usr/local/bin/pipeline-weekly-digest
 StandardOutput=journal
 StandardError=journal

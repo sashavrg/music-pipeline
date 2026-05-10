@@ -14,7 +14,6 @@ Multi-source fill: if peer A has tracks 14-15 and peer B has tracks 16-23,
 both are queued in the same cycle rather than waiting 12h per source.
 """
 
-import importlib.util
 import json
 import re
 import sys
@@ -24,15 +23,13 @@ from collections import defaultdict
 from dataclasses import replace as dc_replace
 from pathlib import Path
 
-sys.path.insert(0, '/usr/local/bin')
-import pipeline_config as cfg
-import pipeline_db
+from . import config as cfg
+from . import db as pipeline_db
+from . import recover
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 LOG_FILE        = cfg.FILL_MISSING_LOG
-RECOVER_PATH    = '/usr/local/bin/slskd-recover.py'
-
 # Cooldown per folder after at least one successful queue attempt in this cycle.
 QUEUE_COOLDOWN_H = cfg.FILL_QUEUE_COOLDOWN_H
 
@@ -116,14 +113,6 @@ def track_num_from_filename(filename: str) -> int:
 
 # ── recover module loader ─────────────────────────────────────────────────────
 
-def load_recover():
-    spec = importlib.util.spec_from_file_location('slskd_recover', RECOVER_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f'cannot load {RECOVER_PATH}')
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
 # ── Multi-source fill logic ───────────────────────────────────────────────────
 
 def assign_tracks_to_sources(all_folders: list, missing_set: set[int]) -> list:
@@ -172,12 +161,6 @@ def main():
         log('Hold state empty — nothing to do')
         return 0
 
-    try:
-        rec = load_recover()
-    except Exception as e:
-        log(f'Failed to load slskd-recover module: {e}', 'ERROR')
-        return 1
-
     queued = skipped_cooldown = skipped_young = skipped_no_tracks = no_results = errors = 0
 
     for folder_name, entry in sorted(hold_state.items()):
@@ -217,7 +200,7 @@ def main():
             continue
 
         # ── Queue busy? ───────────────────────────────────────────────────────
-        pending = rec.pending_download_count()
+        pending = recover.pending_download_count()
         if pending >= MAX_PENDING_DL:
             log(f'[BUSY] queue has {pending} pending, skipping {folder_name}')
             continue
@@ -227,7 +210,7 @@ def main():
         log(f'[SEARCH] query="{query}" for {len(missing)} missing track(s): {missing}')
 
         try:
-            responses = rec.slskd_search(query)
+            responses = recover.slskd_search(query)
         except Exception as e:
             log(f'[ERROR] search failed for {folder_name}: {e}', 'ERROR')
             errors += 1
@@ -241,7 +224,7 @@ def main():
             continue
 
         # ── Get ALL qualifying folders (multi-source) ─────────────────────────
-        all_folders = rec.find_all_folders(responses)
+        all_folders = recover.find_all_folders(responses)
 
         if not all_folders:
             log(f'[NO-QUALITY] {folder_name} — results found but none passed quality filters')
@@ -279,7 +262,7 @@ def main():
             try:
                 partial = dc_replace(source_folder, files=targeted_files,
                                      file_count=len(targeted_files))
-                ok = rec.queue_download(partial)
+                ok = recover.queue_download(partial)
             except Exception as e:
                 log(f'[ERROR] queue failed for {source_folder.username}: {e}', 'ERROR')
                 ok = False

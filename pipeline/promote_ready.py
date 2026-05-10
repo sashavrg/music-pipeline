@@ -12,9 +12,8 @@ from pathlib import Path
 
 import mutagen
 
-sys.path.insert(0, '/usr/local/bin')
-import pipeline_config as cfg
-import pipeline_db
+from . import config as cfg
+from . import db as pipeline_db
 
 PIPELINE_LOCK_PATH = str(cfg.PIPELINE_LOCK_PATH)
 

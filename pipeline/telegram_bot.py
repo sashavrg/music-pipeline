@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import fcntl
-import importlib.util
 import json
 import os
 import re
@@ -14,11 +13,10 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-sys.path.insert(0, '/usr/local/bin')
-import pipeline_config as cfg
-import pipeline_db
+from . import config as cfg
+from . import db as pipeline_db
+from . import recover
 
-RECOVER_PATH = "/usr/local/bin/slskd-recover.py"
 LOG_FILE = str(cfg.TELEGRAM_BOT_LOG)
 
 TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -341,18 +339,6 @@ def render_notification(notif: dict) -> tuple[str | None, str | None]:
 
 # ── Command handling ──────────────────────────────────────────────────────────
 
-def load_recover_module():
-    try:
-        spec = importlib.util.spec_from_file_location("slskd_recover", RECOVER_PATH)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"cannot locate spec for {RECOVER_PATH}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    except Exception as e:
-        log(f"Failed to load recover module: {e}", "ERROR")
-        return None
-
 
 def parse_album_query(text: str):
     text = text.strip()
@@ -378,18 +364,18 @@ def process_query(rec, artist: str, album: str):
     if len(query) > 60:
         query = query[:60].rsplit(" ", 1)[0]
 
-    pending = rec.pending_download_count()
-    if pending >= rec.MAX_PENDING_DL:
-        return False, f"Queue is busy ({pending}/{rec.MAX_PENDING_DL}). Try again in a few minutes."
+    pending = recover.pending_download_count()
+    if pending >= recover.MAX_PENDING_DL:
+        return False, f"Queue is busy ({pending}/{recover.MAX_PENDING_DL}). Try again in a few minutes."
 
-    n_existing = rec.count_existing_tracks(artist, album)
-    responses  = rec.slskd_search(query)
+    n_existing = recover.count_existing_tracks(artist, album)
+    responses  = recover.slskd_search(query)
     if responses is None:
         return False, f"Search error for: {label}"
     if not responses:
         return False, f"No results found for: {label}"
 
-    best = rec.find_best_folder(responses)
+    best = recover.find_best_folder(responses)
     if best is None:
         return False, (
             f"Found {len(responses)} response(s) for {label}, but none passed quality/speed filters."
@@ -401,7 +387,7 @@ def process_query(rec, artist: str, album: str):
             f"best result has {best.file_count}."
         )
 
-    ok = rec.queue_download(best)
+    ok = recover.queue_download(best)
     if not ok:
         return False, f"Failed to queue download for: {label}"
 

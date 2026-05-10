@@ -28,9 +28,8 @@ from dataclasses import dataclass
 from pathlib import PureWindowsPath
 from typing import Optional
 
-sys.path.insert(0, '/usr/local/bin')
-import pipeline_config as cfg
-import pipeline_db
+from . import config as cfg
+from . import db as pipeline_db
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 

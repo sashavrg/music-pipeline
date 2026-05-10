@@ -80,9 +80,26 @@ python3 -c "import acoustid, mutagen" 2>/dev/null \
 [[ $missing -gt 0 ]] && warn "$missing prerequisite(s) missing — continuing anyway"
 
 # ─── Scripts ───────────────────────────────────────────────────────────────────
-hdr "Installing scripts → /usr/local/bin/"
-install -m 755 "$REPO/scripts/"*.py "$REPO/scripts/"*.sh /usr/local/bin/
-ok "$(ls "$REPO/scripts/" | wc -l) scripts installed"
+hdr "Installing entry points → /usr/local/bin/"
+# Clean up Phase-3 leftovers from previous installs (flat .py scripts that have
+# been replaced by package wrappers). Idempotent — `rm -f` is fine if nothing matches.
+rm -f /usr/local/bin/slskd-promote-ready.py \
+      /usr/local/bin/slskd-incomplete-watchdog.py \
+      /usr/local/bin/slskd-fill-missing-tracks.py \
+      /usr/local/bin/slskd-quarantine-requeue.py \
+      /usr/local/bin/slskd-wishlist-check.py \
+      /usr/local/bin/slskd-recover.py \
+      /usr/local/bin/slskd-telegram-bot.py \
+      /usr/local/bin/pipeline-weekly-digest.py \
+      /usr/local/bin/pipeline-weekly-digest.py \
+      /usr/local/bin/beets-quality-upgrade.py \
+      /usr/local/bin/beets-apply-staged-deletions.py \
+      /usr/local/bin/check_chromaprint.py \
+      /usr/local/bin/pipeline_db.py \
+      /usr/local/bin/pipeline_config.py
+install -m 755 "$REPO/bin/"* /usr/local/bin/
+ok "$(ls "$REPO/bin/" | wc -l) entry points installed"
+ok "package modules at $REPO/pipeline/ (wrappers point here via MUSIC_PIPELINE_ROOT)"
 
 # ─── Directories ───────────────────────────────────────────────────────────────
 hdr "Creating runtime directories"

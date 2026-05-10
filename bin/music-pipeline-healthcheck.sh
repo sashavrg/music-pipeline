@@ -13,7 +13,7 @@ case "${LOG_TO_STDOUT:-}" in 1|true|yes|on|TRUE|YES|ON) LOG_FILE=/dev/stdout ;; 
 COMPLETE_DIR="${SLSKD_COMPLETE_DIR:-$SCRATCH_ROOT/complete}"
 INCOMPLETE_DIR="${SLSKD_INCOMPLETE_DIR:-$SCRATCH_ROOT/incomplete}"
 QUARANTINE_DIR="${SLSKD_QUARANTINE_DIR:-$SCRATCH_ROOT/quarantine}"
-CHECKER="/usr/local/bin/check_chromaprint.py"
+CHECKER="/usr/local/bin/check-chromaprint"
 IMPORTER="/usr/local/bin/beets-import.sh"
 WARN_STAMP="$HEALTHCHECK_STATE_DIR/warn-notified.stamp"
 WARN_COOLDOWN_H=24
@@ -46,8 +46,8 @@ notify_telegram() {
     local msg="$1"
     HEALTHCHECK_MSG="$msg" python3 - << 'PY' 2>/dev/null
 import os, sys
-sys.path.insert(0, '/usr/local/bin')
-import pipeline_db
+sys.path.insert(0, os.environ.get('MUSIC_PIPELINE_ROOT', '/opt/music-pipeline'))
+from pipeline import db as pipeline_db
 pipeline_db.init_db()
 pipeline_db.push_notification('healthcheck_alert', '', message=os.environ['HEALTHCHECK_MSG'])
 PY
@@ -176,10 +176,10 @@ check_backlog() {
 
 check_held_folders() {
     python3 - << 'PY' 2>/dev/null
-import sys, time
-sys.path.insert(0, '/usr/local/bin')
+import os, sys, time
+sys.path.insert(0, os.environ.get('MUSIC_PIPELINE_ROOT', '/opt/music-pipeline'))
 try:
-    import pipeline_db
+    from pipeline import db as pipeline_db
     pipeline_db.init_db()
     state = pipeline_db.get_held_folders()
 except Exception as e:
@@ -207,10 +207,10 @@ PY
 
     local py_out
     py_out=$(python3 - << 'PY2' 2>/dev/null
-import sys, time
-sys.path.insert(0, '/usr/local/bin')
+import os, sys, time
+sys.path.insert(0, os.environ.get('MUSIC_PIPELINE_ROOT', '/opt/music-pipeline'))
 try:
-    import pipeline_db
+    from pipeline import db as pipeline_db
     pipeline_db.init_db()
     state = pipeline_db.get_held_folders()
 except Exception:
@@ -308,7 +308,7 @@ check_temperature() {
     if [ "$max_temp" -ge "$TEMP_CRITICAL" ]; then
         fail "CPU critically hot: ${max_temp}°C — stopping pipeline processes"
         systemctl stop beets-import.service 2>/dev/null || true
-        pkill -f "/usr/local/bin/slskd-recover.py" 2>/dev/null || true
+        pkill -f "pipeline.recover\|slskd-recover" 2>/dev/null || true
         log_line "FAIL" "beets-import stopped and slskd-recover killed due to thermal emergency"
     elif [ "$max_temp" -ge "$TEMP_WARN" ]; then
         warn "CPU temperature elevated: ${max_temp}°C"

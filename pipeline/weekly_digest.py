@@ -11,9 +11,8 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, '/usr/local/bin')
-import pipeline_config as cfg
-import pipeline_db
+from . import config as cfg
+from . import db as pipeline_db
 
 LOG_FILE = cfg.WEEKLY_DIGEST_LOG
 

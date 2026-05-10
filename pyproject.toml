@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "music-pipeline"
+version = "0.1.0"
+description = "Automated slskd → beets → Plex music import pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "sasha" }]
+
+# Runtime deps. beets is intentionally listed but excluded from the host
+# install.sh path (we use the system beets there); the container Dockerfile
+# pip-installs everything fresh.
+dependencies = [
+    "mutagen",
+    "pyacoustid",
+    "pyyaml",
+    "requests",
+]
+
+[project.scripts]
+slskd-promote-ready          = "pipeline.promote_ready:main"
+slskd-incomplete-watchdog    = "pipeline.incomplete_watchdog:main"
+slskd-fill-missing-tracks    = "pipeline.fill_missing_tracks:main"
+slskd-quarantine-requeue     = "pipeline.quarantine_requeue:main"
+slskd-wishlist-check         = "pipeline.wishlist_check:main"
+slskd-recover                = "pipeline.recover:main"
+slskd-telegram-bot           = "pipeline.telegram_bot:main"
+pipeline-weekly-digest       = "pipeline.weekly_digest:main"
+beets-quality-upgrade        = "pipeline.beets_quality_upgrade:main"
+beets-apply-staged-deletions = "pipeline.beets_apply_staged_deletions:main"
+check-chromaprint            = "pipeline.check_chromaprint:main"
+
+[tool.setuptools.packages.find]
+include = ["pipeline*"]

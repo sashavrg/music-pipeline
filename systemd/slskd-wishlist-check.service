@@ -5,6 +5,6 @@ After=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=-/etc/music-pipeline.env
-ExecStart=/usr/local/bin/slskd-wishlist-check.py
+ExecStart=/usr/local/bin/slskd-wishlist-check
 StandardOutput=journal
 StandardError=journal

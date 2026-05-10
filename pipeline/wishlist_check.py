@@ -9,18 +9,15 @@ For each pending wishlist entry:
   4. Record attempt/queue timestamps; push notification on success.
 """
 
-import importlib.util
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, '/usr/local/bin')
-import pipeline_config as cfg
-import pipeline_db
+from . import config as cfg
+from . import db as pipeline_db
+from . import recover
 
 LOG_FILE     = cfg.WISHLIST_CHECK_LOG
-RECOVER_PATH = '/usr/local/bin/slskd-recover.py'
-
 SEARCH_COOLDOWN_H = 24
 QUEUED_COOLDOWN_H = 336   # 14 days
 MAX_PENDING_DL    = cfg.FILL_MAX_PENDING_DL
@@ -42,14 +39,6 @@ def log(msg: str, level: str = 'INFO'):
         _log_fh.flush()
 
 
-def load_recover():
-    spec = importlib.util.spec_from_file_location('slskd_recover', RECOVER_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f'cannot load {RECOVER_PATH}')
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
 
 def main():
     setup_logging()
@@ -62,12 +51,6 @@ def main():
         return 0
 
     log(f'Found {len(items)} pending wishlist item(s)')
-
-    try:
-        rec = load_recover()
-    except Exception as e:
-        log(f'Failed to load slskd-recover module: {e}', 'ERROR')
-        return 1
 
     now = time.time()
     searched = queued_count = skipped_cooldown = no_results = errors = 0
@@ -91,7 +74,7 @@ def main():
             skipped_cooldown += 1
             continue
 
-        pending = rec.pending_download_count()
+        pending = recover.pending_download_count()
         if pending >= MAX_PENDING_DL:
             log(f'[BUSY] queue has {pending} pending, skipping #{wid}')
             continue
@@ -104,7 +87,7 @@ def main():
         searched += 1
 
         try:
-            responses = rec.slskd_search(query)
+            responses = recover.slskd_search(query)
         except Exception as e:
             log(f'[ERROR] search failed for #{wid}: {e}', 'ERROR')
             errors += 1
@@ -117,14 +100,14 @@ def main():
             pipeline_db.update_wishlist_attempt(wid, now)
             continue
 
-        best = rec.find_best_folder(responses)
+        best = recover.find_best_folder(responses)
         if best is None:
             log(f'[NO-QUALITY] #{wid} "{artist} - {album}" — no results passed quality filters')
             no_results += 1
             pipeline_db.update_wishlist_attempt(wid, now)
             continue
 
-        ok_flag = rec.queue_download(best)
+        ok_flag = recover.queue_download(best)
         if ok_flag:
             speed_mb = best.upload_speed / 1_000_000
             queued_count += 1

@@ -14,9 +14,9 @@ LOG_DIR="${LOG_DIR:-/var/log}"
 
 IMPORT_DIR="${SLSKD_READY_DIR:-$SCRATCH_ROOT/ready}"
 QUARANTINE_DIR="${SLSKD_QUARANTINE_DIR:-$SCRATCH_ROOT/quarantine}"
-CHECKER="/usr/local/bin/check_chromaprint.py"
-QUALITY_UPGRADER="/usr/local/bin/beets-quality-upgrade.py"
-STAGED_DELETIONS="/usr/local/bin/beets-apply-staged-deletions.py"
+CHECKER="/usr/local/bin/check-chromaprint"
+QUALITY_UPGRADER="/usr/local/bin/beets-quality-upgrade"
+STAGED_DELETIONS="/usr/local/bin/beets-apply-staged-deletions"
 LOOP_STATE_DIR="$BEETS_IMPORT_STATE_DIR"
 CLEAN_LIST="$LOOP_STATE_DIR/clean-dirs.txt"
 LOG="$LOG_DIR/beets-import.log"
@@ -56,9 +56,9 @@ done
 python3 - "$LOOP_STATE_FILE" "$LOOP_WARN_THRESHOLD" "${settled[@]}" <<'PY' 2>/dev/null | while IFS= read -r line; do log "$line"; done
 import json, os, sys
 
-sys.path.insert(0, '/usr/local/bin')
+sys.path.insert(0, os.environ.get('MUSIC_PIPELINE_ROOT', '/opt/music-pipeline'))
 try:
-    import pipeline_db
+    from pipeline import db as pipeline_db
     pipeline_db.init_db()
 except Exception:
     pipeline_db = None
@@ -187,9 +187,9 @@ if [ "$_added" -le 0 ]; then
     # 15 min, spamming Telegram via the loopguard alert path.
     python3 - "$LOOP_STATE_FILE" "$LOOP_WARN_THRESHOLD" "$QUARANTINE_DIR" "${clean[@]}" <<'PY' 2>/dev/null | while IFS= read -r line; do log "$line"; done
 import json, os, shutil, sys
-sys.path.insert(0, '/usr/local/bin')
+sys.path.insert(0, os.environ.get('MUSIC_PIPELINE_ROOT', '/opt/music-pipeline'))
 try:
-    import pipeline_db
+    from pipeline import db as pipeline_db
     pipeline_db.init_db()
 except Exception:
     pipeline_db = None

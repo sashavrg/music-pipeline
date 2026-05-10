@@ -22,7 +22,7 @@ from collections import Counter, defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
-import pipeline_config as cfg
+from . import config as cfg
 
 DB_DIR  = cfg.PIPELINE_STATE_DIR
 DB_PATH = cfg.PIPELINE_DB_PATH

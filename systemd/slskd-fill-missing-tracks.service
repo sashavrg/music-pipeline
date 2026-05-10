@@ -5,6 +5,6 @@ After=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=-/etc/music-pipeline.env
-ExecStart=/usr/local/bin/slskd-fill-missing-tracks.py
+ExecStart=/usr/local/bin/slskd-fill-missing-tracks
 StandardOutput=journal
 StandardError=journal

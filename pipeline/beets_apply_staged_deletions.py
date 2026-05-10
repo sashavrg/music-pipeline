@@ -27,8 +27,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-sys.path.insert(0, "/usr/local/bin")
-import pipeline_config as cfg
+from . import config as cfg
 
 LIB_DB               = cfg.BEETS_DB
 LIB_ROOT             = str(cfg.LIBRARY_ROOT)
