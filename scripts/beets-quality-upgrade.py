@@ -537,19 +537,41 @@ def process_folder(conn, folder: Path):
             items_to_delete[best_existing["id"]] = best_existing
         else:
             # Only drop the incoming file if the matched library file ACTUALLY
-            # exists on disk. If the library DB path is stale (file was moved
-            # out-of-band, deleted manually, or never existed), dropping the
-            # incoming would lose the only copy on the filesystem.
-            lib_path = Path(best_existing.get("path") or "")
-            lib_path_exists = bool(lib_path) and lib_path.exists()
-            if not lib_path_exists:
-                # Treat as new — the library DB has a phantom row.
+            # exists on disk AND is a different file in the real library tree.
+            # Three failure modes we guard against:
+            #   1. Phantom row: library DB path doesn't exist on disk.
+            #   2. Self-match: library row points at the incoming file itself
+            #      (happens when a previous `beet import` registered tracks but
+            #      `beet move` was interrupted, leaving DB rows pointing into
+            #      ready/). Deleting would destroy the only copy.
+            #   3. Scratch path: library row points anywhere under /mnt/scratch/,
+            #      meaning the previous import never relocated. Same risk as (2).
+            lib_path_str = best_existing.get("path") or ""
+            lib_path = Path(lib_path_str)
+            incoming_path = Path(t['path'])
+            lib_path_exists = bool(lib_path_str) and lib_path.exists()
+            same_file = False
+            if lib_path_exists:
+                try:
+                    same_file = lib_path.resolve() == incoming_path.resolve()
+                except Exception:
+                    same_file = str(lib_path) == str(incoming_path)
+            in_scratch = lib_path_str.startswith("/mnt/scratch/")
+
+            if not lib_path_exists or same_file or in_scratch:
+                # Treat as new — the library DB row is stale/self-referential.
                 has_new = True
                 new_count += 1
+                if not lib_path_exists:
+                    reason = "missing on disk"
+                elif same_file:
+                    reason = "self-match (DB row points at incoming file — interrupted prior import)"
+                else:
+                    reason = "DB row points into /mnt/scratch/ (interrupted prior import)"
                 log(
-                    f"[QUALITY-WARN] library DB row points to missing file: "
-                    f"{best_existing['path']!r} — keeping incoming "
-                    f"{Path(t['path']).name!r} for import (would have been dropped)"
+                    f"[QUALITY-WARN] phantom library match ({reason}): "
+                    f"{lib_path_str!r} — keeping incoming "
+                    f"{incoming_path.name!r} for import (would have been dropped)"
                 )
                 continue
             downgrade_or_equal += 1

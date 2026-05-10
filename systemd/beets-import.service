@@ -2,7 +2,6 @@
 Description=Beets auto-import from slskd scratch
 After=local-fs.target network-online.target slskd-promote-ready.service
 Wants=network-online.target
-Conflicts=slskd-promote-ready.service
 
 [Service]
 Type=oneshot

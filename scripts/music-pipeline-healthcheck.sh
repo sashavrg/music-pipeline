@@ -235,6 +235,16 @@ check_recent_errors() {
         ok "no errors in recent beets log window"
     fi
 
+    # Phantom library matches in the quality-prefilter — usually means a prior
+    # `beet import` registered tracks but `beet move` was interrupted, leaving
+    # stale DB rows. The prefilter now refuses to delete in this case; surface
+    # the event so we know a manual `beet rm` may be needed.
+    local quality_warn_count
+    quality_warn_count=$(tail -n 1000 "$BEETS_LOG" | grep -Ec "\[QUALITY-WARN\]")
+    if [ "$quality_warn_count" -gt 0 ]; then
+        warn "quality-prefilter saw ${quality_warn_count} phantom library match(es) — check beets DB for stale rows"
+    fi
+
     # Check pipeline isn't idle — last import cycle should have run within 2h
     local last_cycle_age
     last_cycle_age=$(awk '/Import cycle finished|No files in import dir/{last=$1" "$2} END{print last}' "$BEETS_LOG" 2>/dev/null | \
