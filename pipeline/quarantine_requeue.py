@@ -238,7 +238,7 @@ def main():
                 pipeline_db.upsert_quarantine_state(key, new_last_attempt, last_queued)
                 continue
 
-            best = recover.find_best_folder(responses)
+            best = recover.find_best_folder(responses, query=query)
             if best is None:
                 log(f'[NO-QUALITY] {key} — results found but none passed quality filters')
                 no_results += 1

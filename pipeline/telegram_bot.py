@@ -375,7 +375,7 @@ def process_query(rec, artist: str, album: str):
     if not responses:
         return False, f"No results found for: {label}"
 
-    best = recover.find_best_folder(responses)
+    best = recover.find_best_folder(responses, artist=artist, album=album)
     if best is None:
         return False, (
             f"Found {len(responses)} response(s) for {label}, but none passed quality/speed filters."

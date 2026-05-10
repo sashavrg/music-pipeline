@@ -100,7 +100,7 @@ def main():
             pipeline_db.update_wishlist_attempt(wid, now)
             continue
 
-        best = recover.find_best_folder(responses)
+        best = recover.find_best_folder(responses, artist=artist, album=album)
         if best is None:
             log(f'[NO-QUALITY] #{wid} "{artist} - {album}" — no results passed quality filters')
             no_results += 1

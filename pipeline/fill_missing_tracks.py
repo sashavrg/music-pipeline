@@ -224,7 +224,7 @@ def main():
             continue
 
         # ── Get ALL qualifying folders (multi-source) ─────────────────────────
-        all_folders = recover.find_all_folders(responses)
+        all_folders = recover.find_all_folders(responses, query=query)
 
         if not all_folders:
             log(f'[NO-QUALITY] {folder_name} — results found but none passed quality filters')

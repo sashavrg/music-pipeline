@@ -371,10 +371,59 @@ def _file_score(f: dict) -> int:
 
     return base
 
-def _score_folder(audio_files: list, upload_speed: int) -> int:
+_TOKEN_SPLIT_RE = re.compile(r"[\s\-_\.\(\)\[\]\{\}/\\,&'\"]+")
+# Tokens that show up in folder names but shouldn't help match the query.
+_TOKEN_STOPWORDS = {
+    "", "the", "a", "an", "and", "of", "&",
+    "flac", "mp3", "wav", "aac", "ogg", "opus", "alac", "ape", "wv",
+    "web", "cd", "lp", "ep", "single", "vinyl", "remaster", "remastered",
+    "lossless", "hires", "hi", "res", "kbps", "khz", "bit",
+    "deluxe", "expanded", "edition", "limited", "anniversary",
+    "music", "share", "shared", "albums", "discography",
+}
+
+def _tokens(s: str) -> set[str]:
+    return {
+        t for t in (_TOKEN_SPLIT_RE.split(s.lower()))
+        if t and t not in _TOKEN_STOPWORDS and not t.isdigit()
+    }
+
+def _folder_match_bonus(folder_dir: str, album_tokens: set[str], artist_tokens: set[str]) -> int:
+    """Boost folders whose immediate-parent directory name overlaps with the
+    album (heavily) and artist (lightly) tokens. The parent dir (NOT the full
+    share path) is what we'd be downloading INTO — the right discriminator,
+    because a peer with an artist-organized share has every album under
+    .../Artist/ and only the matching album folder is what we want.
+
+    Weights:
+      +50 per album token in folder name (e.g. {optimist} hit → +50)
+      +30 bonus when ALL album tokens are present (avoids partial-match ties)
+      +15 per artist token in folder name (helps disambiguate, doesn't beat
+          an album-name mismatch — a 1-file `Cory Wong/Live in Amsterdam (2020)/`
+          folder must NOT outscore a multi-file `The Optimist (2019)/` folder)
+    """
+    if not album_tokens and not artist_tokens:
+        return 0
+    name_tokens = _tokens(PureWindowsPath(folder_dir).name)
+    bonus = 0
+    if album_tokens:
+        album_overlap = len(album_tokens & name_tokens)
+        bonus += album_overlap * 50
+        if album_overlap == len(album_tokens):
+            bonus += 30   # full-album-match jackpot
+    if artist_tokens:
+        bonus += len(artist_tokens & name_tokens) * 15
+    return bonus
+
+def _score_folder(audio_files: list, upload_speed: int,
+                  album_tokens: set[str] | None = None,
+                  artist_tokens: set[str] | None = None) -> int:
     """
     Score a folder of audio files. Returns -1 if it fails minimum requirements.
     Uses the weakest file's score as the base (no mixed-quality folders).
+    When `album_tokens` / `artist_tokens` are provided, also adds a folder-name
+    match bonus — crucial for picking the right album when slskd returns
+    spurious hits from unrelated folders in the same peer's share tree.
     """
     if upload_speed < MIN_UPLOAD_SPEED or not audio_files:
         return -1
@@ -388,12 +437,39 @@ def _score_folder(audio_files: list, upload_speed: int) -> int:
     speed_bonus  = min(int(upload_speed / MIN_UPLOAD_SPEED * 5), 50)  # up to +50
     count_bonus  = min(len(audio_files) * 2, 40)           # up to +40
 
-    return base + speed_bonus + count_bonus
+    name_bonus = 0
+    if album_tokens or artist_tokens:
+        folder_dir = str(PureWindowsPath(audio_files[0].get("filename", "")).parent)
+        name_bonus = _folder_match_bonus(folder_dir, album_tokens or set(), artist_tokens or set())
 
-def find_best_folder(responses: list) -> Optional[FolderResult]:
-    """Pick the highest-scoring (username, directory) folder from all responses."""
+    return base + speed_bonus + count_bonus + name_bonus
+
+
+def _split_query(query: str, artist: str, album: str) -> tuple[set[str], set[str]]:
+    """Resolve (album_tokens, artist_tokens) from any combination of inputs.
+    Callers can pass structured artist+album, OR a raw "artist album" /
+    "artist - album" query string and we'll try to split it."""
+    if album or artist:
+        return _tokens(album), _tokens(artist)
+    if not query:
+        return set(), set()
+    # Fallback: try the "artist - album" convention
+    if " - " in query:
+        a, _, b = query.partition(" - ")
+        return _tokens(b), _tokens(a)
+    # No structure — treat whole thing as album tokens (better to over-weight
+    # than to mis-attribute)
+    return _tokens(query), set()
+
+def find_best_folder(responses: list, query: str = "",
+                      artist: str = "", album: str = "") -> Optional[FolderResult]:
+    """Pick the highest-scoring (username, directory) folder from all responses.
+    Pass `artist` + `album` (preferred) or `query` to enable folder-name match
+    scoring — required to avoid picking a 1-file match from an unrelated album
+    when the peer also shares the requested album. See _folder_match_bonus()."""
     best_score = -1
     best: Optional[FolderResult] = None
+    album_tokens, artist_tokens = _split_query(query, artist, album)
 
     for resp in responses:
         username     = resp.get("username", "")
@@ -414,7 +490,9 @@ def find_best_folder(responses: list) -> Optional[FolderResult]:
             if not audio:
                 continue
 
-            score = _score_folder(audio, upload_speed)
+            score = _score_folder(audio, upload_speed,
+                                   album_tokens=album_tokens,
+                                   artist_tokens=artist_tokens)
             if score <= best_score:
                 continue
 
@@ -431,11 +509,15 @@ def find_best_folder(responses: list) -> Optional[FolderResult]:
     return best
 
 
-def find_all_folders(responses: list) -> list:
+def find_all_folders(responses: list, query: str = "",
+                      artist: str = "", album: str = "") -> list:
     """Return all qualifying FolderResult objects sorted by score desc.
-    Used for multi-source filling where different peers may have different tracks."""
+    Used for multi-source filling where different peers may have different tracks.
+    Pass `artist` + `album` (preferred) or `query` to apply the same folder-name
+    match bonus as find_best_folder()."""
     results = []
     seen: set[tuple[str, str]] = set()
+    album_tokens, artist_tokens = _split_query(query, artist, album)
 
     for resp in responses:
         username     = resp.get("username", "")
@@ -460,7 +542,9 @@ def find_all_folders(responses: list) -> list:
             if not audio:
                 continue
 
-            score = _score_folder(audio, upload_speed)
+            score = _score_folder(audio, upload_speed,
+                                   album_tokens=album_tokens,
+                                   artist_tokens=artist_tokens)
             if score < 0:
                 continue
 
@@ -615,7 +699,7 @@ def main():
             continue
 
         # ── Score results ─────────────────────────────────────────────────
-        best = find_best_folder(responses)
+        best = find_best_folder(responses, query=query)
 
         if best is None:
             log(f"  no match meeting quality/speed criteria ({len(responses)} responses)")
