@@ -357,8 +357,9 @@ def parse_album_query(text: str):
 
 
 def process_query(rec, artist: str, album: str):
-    if rec is None:
-        return False, "recover module unavailable — check server logs."
+    # `rec` is the recover module (kept as a parameter for testability —
+    # tests can pass a mock). Module-level `from . import recover` means
+    # this is never None at runtime, so no defensive guard.
     label = f"{artist} - {album}"
     query = f"{artist} {album}".strip()
     if len(query) > 60:
@@ -548,8 +549,7 @@ def handle_message(update: dict):
 
     send_message(chat_id, f"Searching and scoring: {artist} - {album}")
     try:
-        rec = load_recover_module()
-        ok, result = process_query(rec, artist, album)
+        ok, result = process_query(recover, artist, album)
         send_message(chat_id, result)
         outcome = "queued" if ok else "not queued"
         first_line = result.splitlines()[0] if result else ""
@@ -588,10 +588,7 @@ def main():
     acquire_instance_lock()
     pipeline_db.init_db()
 
-    if load_recover_module() is None:
-        log("WARNING: recover module failed to load at startup", "WARN")
-    else:
-        log("recover module loaded OK at startup")
+    # recover is imported at module top — if that failed we wouldn't be here.
     log("slskd-telegram-bot started")
 
     signal.signal(signal.SIGINT,  handle_signal)
