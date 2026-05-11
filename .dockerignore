@@ -1,0 +1,29 @@
+# Don't ship the repo's metadata or secrets into the build context.
+.git
+.github
+.gitignore
+.env
+.env.local
+.env.*.local
+
+# Docs and host-only artifacts
+README.md
+DOCKER.md
+LICENSE
+Makefile
+
+# Python local state
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.venv
+venv
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+*.swp
+*.swo

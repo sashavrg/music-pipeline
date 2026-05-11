@@ -1,5 +1,8 @@
 # music-pipeline
 
+[![docker build](https://github.com/sashavrg/music-pipeline/actions/workflows/docker.yml/badge.svg)](https://github.com/sashavrg/music-pipeline/actions/workflows/docker.yml)
+[![ghcr.io image](https://img.shields.io/badge/ghcr.io-music--pipeline-blue?logo=docker)](https://github.com/sashavrg/music-pipeline/pkgs/container/music-pipeline)
+
 Soulseek → beets → Plex automation for a self-hosted music library.
 
 Album requests come in via a Telegram bot, get downloaded by [slskd](https://github.com/slskd/slskd), settle through a staging area, get fingerprinted and quality-checked, and finally land in the Plex library via [beets](https://beets.io). State is shared across processes through a single SQLite DB.

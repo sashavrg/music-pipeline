@@ -1,0 +1,79 @@
+name: docker
+
+# Builds music-pipeline as a multi-arch image and publishes to GHCR.
+#
+# Triggers:
+#   - push to master  → tags `latest` + git SHA
+#   - tag `vX.Y.Z`    → tags `X.Y.Z`, `X.Y`, `latest`
+#   - PR to master    → build only (no push), to verify the Dockerfile still works
+#   - manual          → workflow_dispatch
+#
+# Auth: uses the auto-provisioned GITHUB_TOKEN — no manual PAT rotation needed.
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # QEMU lets us build arm64 (Raspberry Pi, Apple Silicon hosts) from an
+      # amd64 GitHub runner. Slower than native but no separate runner config.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Skip the login on PRs (no push, no creds needed). On push to master and
+      # tags, log in to GHCR with the auto-provisioned token — packages:write
+      # permission above grants the necessary scope.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Compute the tag set:
+      #   - branch push (master)    → :latest, :master, :master-<sha>
+      #   - tag vX.Y.Z              → :X.Y.Z, :X.Y, :latest
+      #   - PR                      → :pr-<n> (built only, not pushed)
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/music-pipeline
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # gha cache survives across runs — second build of unchanged layers
+          # comes from cache instead of rebuilding.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

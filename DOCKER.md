@@ -2,6 +2,10 @@
 
 Brings up slskd + the full pipeline (10 services) via `docker compose`. The pipeline writes imported albums to a host directory that Plex watches.
 
+Prebuilt images for `linux/amd64` and `linux/arm64` are published at
+[`ghcr.io/sashavrg/music-pipeline`](https://github.com/sashavrg/music-pipeline/pkgs/container/music-pipeline)
+on every push to master (and on every `vX.Y.Z` tag for pinned releases).
+
 ## Prerequisites
 
 - Docker 20.10+ with the Compose plugin (`docker compose ...`, not `docker-compose`)
