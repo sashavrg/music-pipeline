@@ -28,9 +28,12 @@ export MUSIC_LIBRARY_ROOT=/srv/media/music
 Bring it up:
 
 ```sh
+docker compose pull                       # fetch the prebuilt image from GHCR
 docker compose up -d
-docker compose logs -f telegram-bot      # confirm the bot is polling
+docker compose logs -f telegram-bot       # confirm the bot is polling
 ```
+
+The compose file points at `ghcr.io/sashavrg/music-pipeline:latest` by default. To build locally instead (for development), `docker compose build` rebuilds from the Dockerfile in this repo and overrides the registry image.
 
 Send `/status` to your bot in Telegram. You should get a reply.
 
@@ -77,10 +80,14 @@ Send `/queue Artist - Album` to the bot in Telegram.
 
 **Update to latest:**
 ```sh
-git pull
-docker compose pull         # upstream slskd
-docker compose build        # rebuild the pipeline image
-docker compose up -d
+git pull                    # pull latest compose / .env.example
+docker compose pull         # pull latest music-pipeline + slskd images from GHCR
+docker compose up -d        # restart services on the new images
+```
+
+If you've been building locally (`docker compose build` instead of pulling), rebuild after `git pull`:
+```sh
+docker compose build && docker compose up -d
 ```
 
 ## Differences from the host install

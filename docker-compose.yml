@@ -22,8 +22,11 @@
 #      polling Telegram and your /status reply lands in the chat
 
 # ─── Shared service template ──────────────────────────────────────────────────
+# Pulls the prebuilt image from GHCR by default. `docker compose build` still
+# works for local development — it'll build from the Dockerfile in this repo
+# and tag the result with the same name, overriding the registry copy.
 x-pipeline-base: &pipeline-base
-  image: music-pipeline:latest
+  image: ghcr.io/sashavrg/music-pipeline:latest
   build:
     context: .
     dockerfile: Dockerfile
