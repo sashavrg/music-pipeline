@@ -14,6 +14,7 @@ import mutagen
 
 from . import config as cfg
 from . import db as pipeline_db
+from . import musicbrainz as mb
 
 PIPELINE_LOCK_PATH = str(cfg.PIPELINE_LOCK_PATH)
 
@@ -153,6 +154,8 @@ def group_by_disc(files, folder):
 def check_group_incomplete(files, skip_tag_total=False):
     nums = set()
     totals = []
+    artists = []
+    albums = []
     for p in files:
         trk = 0
         try:
@@ -168,6 +171,13 @@ def check_group_incomplete(files, skip_tag_total=False):
                         tot = int(m.group(1))
                 if tot > 0:
                     totals.append(tot)
+                a = get_first(t, ['albumartist', 'ALBUMARTIST', 'TPE2',
+                                  'artist', 'ARTIST', 'TPE1'])
+                al = get_first(t, ['album', 'ALBUM', 'TALB'])
+                if a:
+                    artists.append(a.strip())
+                if al:
+                    albums.append(al.strip())
         except Exception:
             pass
         if trk == 0:
@@ -200,6 +210,21 @@ def check_group_incomplete(files, skip_tag_total=False):
 
     if len(files) <= 2 and maxn > len(files):
         return True, f'sparse-tracks track={maxn} files={len(files)}'
+
+    # MusicBrainz fallback: contiguous tracks but no tag-total → ask MB how
+    # many tracks the release should have. Catches "side A only" rips where
+    # filenames are sequential 01-04 with no missing-number signal.
+    if not totals and not skip_tag_total and 3 <= len(files) < 30 and artists and albums:
+        artist = Counter(artists).most_common(1)[0][0]
+        album = Counter(albums).most_common(1)[0][0]
+        try:
+            mb_total = mb.lookup_track_count(artist, album)
+        except Exception as e:
+            log(f'[PROMOTE-WARN] mb lookup failed for {artist!r}/{album!r}: {e}')
+            mb_total = None
+        if mb_total and mb_total > len(files):
+            return True, (f'mb-lookup artist={artist!r} album={album!r} '
+                          f'present={len(files)}/{mb_total}')
 
     return False, 'ok'
 

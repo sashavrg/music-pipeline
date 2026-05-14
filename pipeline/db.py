@@ -120,6 +120,13 @@ CREATE TABLE IF NOT EXISTS schema_version (
     name        TEXT PRIMARY KEY,
     applied_at  REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mb_album_cache (
+    artist_key   TEXT NOT NULL,
+    album_key    TEXT NOT NULL,
+    track_count  INTEGER,
+    queried_at   REAL NOT NULL,
+    PRIMARY KEY (artist_key, album_key)
+);
 CREATE INDEX IF NOT EXISTS ix_notify_pending ON notify_queue (delivered_at) WHERE delivered_at IS NULL;
 CREATE INDEX IF NOT EXISTS ix_wishlist_pending ON wishlist (fulfilled_at) WHERE fulfilled_at IS NULL;
 CREATE INDEX IF NOT EXISTS ix_notify_delivered ON notify_queue (delivered_at) WHERE delivered_at IS NOT NULL;
@@ -546,6 +553,39 @@ def remove_wishlist(wid: int) -> bool:
     with _db() as con:
         cur = con.execute('DELETE FROM wishlist WHERE id=?', (wid,))
         return cur.rowcount > 0
+
+
+# ── MusicBrainz album-size cache ──────────────────────────────────────────────
+
+def _mb_key(s: str) -> str:
+    return ' '.join((s or '').lower().split())
+
+
+def get_mb_cached_track_count(artist: str, album: str, ttl_seconds: float):
+    """
+    Return (track_count, is_fresh) or None if no usable cache entry.
+    track_count may be None (cached negative result — MB had nothing).
+    is_fresh=False means the row exists but is past TTL.
+    """
+    with _db() as con:
+        row = con.execute(
+            'SELECT track_count, queried_at FROM mb_album_cache '
+            'WHERE artist_key=? AND album_key=?',
+            (_mb_key(artist), _mb_key(album)),
+        ).fetchone()
+    if not row:
+        return None
+    fresh = (time.time() - row['queried_at']) < ttl_seconds
+    return (row['track_count'], fresh)
+
+
+def upsert_mb_cache(artist: str, album: str, track_count):
+    with _db() as con:
+        con.execute(
+            'INSERT OR REPLACE INTO mb_album_cache '
+            '(artist_key, album_key, track_count, queried_at) VALUES (?,?,?,?)',
+            (_mb_key(artist), _mb_key(album), track_count, time.time()),
+        )
 
 
 # ── weekly digest helpers ─────────────────────────────────────────────────────

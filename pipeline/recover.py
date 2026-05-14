@@ -331,11 +331,14 @@ def slskd_search(query: str) -> Optional[list]:
             api_delete(f"/api/v0/searches/{search_id}")
             return data.get("responses", [])
 
-    # Timed out — return whatever arrived
+    # Helper deadline elapsed before slskd marked the search complete.
+    # slskd only populates `responses[]` on the search detail endpoint after
+    # its own 40s network timeout, so fall back to the per-search /responses
+    # endpoint which returns whatever's arrived so far regardless of state.
     try:
-        data = api_get(f"/api/v0/searches/{search_id}?includeResponses=true")
+        responses = api_get(f"/api/v0/searches/{search_id}/responses")
         api_delete(f"/api/v0/searches/{search_id}")
-        return data.get("responses", [])
+        return responses if isinstance(responses, list) else []
     except Exception:
         return []
 
