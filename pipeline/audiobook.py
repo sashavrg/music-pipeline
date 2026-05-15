@@ -154,4 +154,13 @@ def route_audiobook(folder: Path, audio_files: list[Path],
     if target.exists():
         target = dst_dir / f'{title}__{time.strftime("%Y%m%d-%H%M%S")}'
     shutil.move(str(folder), str(target))
+    # Best-effort: ping Audiobookshelf so it picks up the new folder right
+    # away. The auto-match timer will run a few minutes later and fill in
+    # the metadata. Any failure is non-fatal — the new book is already on
+    # disk where ABS's filesystem watcher will eventually notice it.
+    try:
+        from . import abs_automatch
+        abs_automatch.trigger_scan_all()
+    except Exception:
+        pass
     return target

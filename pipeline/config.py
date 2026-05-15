@@ -63,6 +63,13 @@ def open_log_file(path):
 # them through unchanged. Python code uses the shorter attribute names below.
 LIBRARY_ROOT       = _path("MUSIC_LIBRARY_ROOT", "/mnt/storage/share/media/music/music")
 AUDIOBOOKS_LIBRARY_ROOT = _path("AUDIOBOOKS_LIBRARY_ROOT", "/mnt/storage/share/media/audiobooks")
+
+# Audiobookshelf integration (auto-match worker)
+ABS_URL        = _str("ABS_URL",        "http://localhost:13378")
+# Token lookup falls back to the ABS sqlite DB if this env is unset.
+ABS_TOKEN      = _str("ABS_TOKEN",      "")
+ABS_DB_PATH    = _path("ABS_DB_PATH",   "/srv/audiobookshelf/config/absdatabase.sqlite")
+ABS_PROVIDER   = _str("ABS_PROVIDER",   "openlibrary")
 SCRATCH_ROOT       = _path("SCRATCH_ROOT",       "/mnt/scratch/slskd")
 BEETS_CONFIG_DIR   = _path("BEETS_CONFIG_DIR",   "/root/.config/beets")
 PIPELINE_STATE_DIR = _path("PIPELINE_STATE_DIR", "/var/lib/pipeline")
@@ -107,6 +114,7 @@ QUARANTINE_REQUEUE_LOG  = LOG_DIR / "slskd-quarantine-requeue.log"
 WISHLIST_CHECK_LOG      = LOG_DIR / "slskd-wishlist-check.log"
 WEEKLY_DIGEST_LOG       = LOG_DIR / "pipeline-weekly-digest.log"
 HEALTHCHECK_LOG         = LOG_DIR / "music-pipeline-health.log"
+ABS_AUTOMATCH_LOG       = LOG_DIR / "abs-automatch.log"
 
 # ─── Other library files ────────────────────────────────────────────────────
 LOST_ALBUMS_FILE = _str("LOST_ALBUMS_FILE", str(LIBRARY_ROOT / "LOST_ALBUMS.md"))
