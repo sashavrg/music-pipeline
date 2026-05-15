@@ -62,6 +62,7 @@ def open_log_file(path):
 # Env var names align with .env.example so install.sh / docker-compose can pass
 # them through unchanged. Python code uses the shorter attribute names below.
 LIBRARY_ROOT       = _path("MUSIC_LIBRARY_ROOT", "/mnt/storage/share/media/music/music")
+AUDIOBOOKS_LIBRARY_ROOT = _path("AUDIOBOOKS_LIBRARY_ROOT", "/mnt/storage/share/media/audiobooks")
 SCRATCH_ROOT       = _path("SCRATCH_ROOT",       "/mnt/scratch/slskd")
 BEETS_CONFIG_DIR   = _path("BEETS_CONFIG_DIR",   "/root/.config/beets")
 PIPELINE_STATE_DIR = _path("PIPELINE_STATE_DIR", "/var/lib/pipeline")

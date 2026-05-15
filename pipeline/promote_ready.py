@@ -12,6 +12,7 @@ from pathlib import Path
 
 import mutagen
 
+from . import audiobook
 from . import config as cfg
 from . import db as pipeline_db
 from . import musicbrainz as mb
@@ -270,6 +271,7 @@ def main():
     max_hold_seconds = args.max_hold_hours * 3600
 
     promoted = skipped_unsettled = skipped_incomplete = skipped_empty = escalated = 0
+    routed_audiobooks = 0
     current_folders = set()
 
     for folder in sorted([p for p in SRC.iterdir() if p.is_dir()]):
@@ -280,6 +282,18 @@ def main():
         files = folder_audio_files(folder)
         if not files:
             skipped_empty += 1
+            continue
+
+        is_audiobook, ab_reason = audiobook.looks_like_audiobook(files)
+        if is_audiobook:
+            target = audiobook.route_audiobook(folder, files)
+            pipeline_db.delete_held_folder(folder.name)
+            routed_audiobooks += 1
+            log(f'[AUDIOBOOK] {folder.name} -> {target} | {ab_reason}')
+            pipeline_db.push_notification(
+                'audiobook_routed', folder.name,
+                target=str(target), reason=ab_reason,
+            )
             continue
 
         incomplete, reason = album_looks_incomplete(files, folder)
@@ -346,6 +360,7 @@ def main():
 
     log(
         f'[SUMMARY] promoted={promoted} '
+        f'audiobooks_routed={routed_audiobooks} '
         f'escalated={escalated} '
         f'skipped_unsettled={skipped_unsettled} '
         f'skipped_incomplete={skipped_incomplete} '

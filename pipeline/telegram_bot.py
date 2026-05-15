@@ -183,6 +183,15 @@ def render_notification(notif: dict) -> tuple[str | None, str | None]:
             f"Check beets log; may need manual import or quarantine.{_fmt_ts(ts)}",
         )
 
+    if event == "audiobook_routed":
+        target = notif.get("target", "?")
+        reason = notif.get("reason", "")
+        return (
+            f"Sent audiobook-routed notification: {folder}",
+            f"\U0001f4d6 Audiobook routed\n{folder}\n→ {target}\n"
+            f"signals: {reason}{_fmt_ts(ts)}",
+        )
+
     if event == "healthcheck_alert":
         message = notif.get("message", "pipeline health issue detected")
         return (
