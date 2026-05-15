@@ -226,6 +226,8 @@ def main() -> int:
                     nargs='?', default='match-all')
     ap.add_argument('arg', nargs='?', help='item-id for match-item')
     ap.add_argument('--provider', default=cfg.ABS_PROVIDER)
+    ap.add_argument('--force', action='store_true',
+                    help='for match-item: re-match even if the item already has metadata')
     args = ap.parse_args()
 
     if not _token():
@@ -245,8 +247,8 @@ def main() -> int:
         except Exception as e:
             log(f'fetch item failed: {e}', 'ERROR')
             return 3
-        if not needs_match(payload):
-            log(f'item {args.arg} already has an ID — nothing to do')
+        if not args.force and not needs_match(payload):
+            log(f'item {args.arg} already has an ID — nothing to do (use --force to rematch)')
             return 0
         ok = match_item(payload, args.provider)
         log(f'[MATCH-ITEM] {args.arg} -> updated={ok}')

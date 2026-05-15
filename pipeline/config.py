@@ -69,7 +69,7 @@ ABS_URL        = _str("ABS_URL",        "http://localhost:13378")
 # Token lookup falls back to the ABS sqlite DB if this env is unset.
 ABS_TOKEN      = _str("ABS_TOKEN",      "")
 ABS_DB_PATH    = _path("ABS_DB_PATH",   "/srv/audiobookshelf/config/absdatabase.sqlite")
-ABS_PROVIDER   = _str("ABS_PROVIDER",   "openlibrary")
+ABS_PROVIDER   = _str("ABS_PROVIDER",   "audible")
 SCRATCH_ROOT       = _path("SCRATCH_ROOT",       "/mnt/scratch/slskd")
 BEETS_CONFIG_DIR   = _path("BEETS_CONFIG_DIR",   "/root/.config/beets")
 PIPELINE_STATE_DIR = _path("PIPELINE_STATE_DIR", "/var/lib/pipeline")
