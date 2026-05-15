@@ -61,6 +61,8 @@ def main():
         album        = item['album']
         last_attempt = item['last_attempt'] or 0
         last_queued  = item['last_queued']  or 0
+        kind         = item.get('kind') or 'music'
+        profile      = recover.AUDIOBOOK if kind == 'audiobook' else recover.MUSIC
 
         if last_queued and (now - last_queued) / 3600 < QUEUED_COOLDOWN_H:
             elapsed_h = (now - last_queued) / 3600
@@ -100,9 +102,9 @@ def main():
             pipeline_db.update_wishlist_attempt(wid, now)
             continue
 
-        best = recover.find_best_folder(responses, artist=artist, album=album)
+        best = recover.find_best_folder(responses, artist=artist, album=album, profile=profile)
         if best is None:
-            log(f'[NO-QUALITY] #{wid} "{artist} - {album}" — no results passed quality filters')
+            log(f'[NO-QUALITY] #{wid} "{artist} - {album}" — no results passed quality filters ({profile.name})')
             no_results += 1
             pipeline_db.update_wishlist_attempt(wid, now)
             continue

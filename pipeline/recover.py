@@ -69,6 +69,42 @@ DEPTH_BONUS = {16: 0, 24: 30, 32: 30}
 RATE_BONUS  = {44100: 0, 48000: 10, 88200: 20, 96000: 25, 192000: 25}
 
 
+# ── Quality profiles ─────────────────────────────────────────────────────────
+# Different content types tolerate different thresholds. Music is the default
+# (lossless-preferring, 310 kbps MP3 floor); audiobooks are commonly 32-96 kbps
+# mp3/m4a/m4b from slow peers, so the floor needs to drop dramatically.
+
+@dataclass(frozen=True)
+class QualityProfile:
+    name:             str
+    min_upload_speed: int             # bytes/s
+    mp3_min_kbps:     int
+    format_scores:    dict[str, int]  # full ext → base-score override
+
+
+MUSIC = QualityProfile(
+    name='music',
+    min_upload_speed=MIN_UPLOAD_SPEED,
+    mp3_min_kbps=MP3_MIN_KBPS,
+    format_scores=FORMAT_SCORES,
+)
+
+AUDIOBOOK = QualityProfile(
+    name='audiobook',
+    min_upload_speed=500_000,   # 0.5 MB/s — many audiobook peers are slow
+    mp3_min_kbps=24,            # 32/48/64 kbps mono is normal
+    format_scores={
+        # Same lossless tiers as MUSIC so a rare FLAC rip still wins, but
+        # add m4a/m4b/aac at mp3-equivalent base score — these are the
+        # dominant audiobook container formats.
+        'flac': 500, 'wav': 450, 'aiff': 450, 'aif': 450,
+        'ape': 420, 'wv': 420, 'alac': 420,
+        'opus': 300,
+        'mp3': 200, 'm4a': 200, 'm4b': 200, 'aac': 200,
+    },
+)
+
+
 # ── Data classes ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -348,18 +384,26 @@ def slskd_search(query: str) -> Optional[list]:
 def _ext(filename: str) -> str:
     return PureWindowsPath(filename).suffix.lstrip(".").lower()
 
-def _file_score(f: dict) -> int:
+def _file_score(f: dict, profile: QualityProfile = MUSIC) -> int:
     """Score a single file. Returns -1 if the file should be rejected."""
     ext  = _ext(f.get("filename", ""))
-    base = FORMAT_SCORES.get(ext, -1)
+    base = profile.format_scores.get(ext, -1)
     if base <= 0:
         return -1
 
-    # MP3: verify bitrate from size / length
-    if ext == "mp3":
+    # mp3-family: verify bitrate from size / length when length is available.
+    # For m4a/m4b/aac (audiobook profile) slskd often omits length; in that
+    # case accept the file at its base score and let the folder score sort it.
+    if ext in ("mp3", "m4a", "m4b", "aac"):
         size, length = f.get("size", 0), f.get("length", 0)
-        if length <= 0 or (size * 8 / length / 1000) < MP3_MIN_KBPS:
-            return -1
+        if length > 0:
+            kbps = size * 8 / length / 1000
+            if kbps < profile.mp3_min_kbps:
+                return -1
+        elif ext == "mp3":
+            # mp3 with unknown length under MUSIC profile is suspicious.
+            if profile is MUSIC:
+                return -1
         return base
 
     # Lossless: add depth and sample-rate bonus
@@ -420,7 +464,8 @@ def _folder_match_bonus(folder_dir: str, album_tokens: set[str], artist_tokens: 
 
 def _score_folder(audio_files: list, upload_speed: int,
                   album_tokens: set[str] | None = None,
-                  artist_tokens: set[str] | None = None) -> int:
+                  artist_tokens: set[str] | None = None,
+                  profile: QualityProfile = MUSIC) -> int:
     """
     Score a folder of audio files. Returns -1 if it fails minimum requirements.
     Uses the weakest file's score as the base (no mixed-quality folders).
@@ -428,16 +473,16 @@ def _score_folder(audio_files: list, upload_speed: int,
     match bonus — crucial for picking the right album when slskd returns
     spurious hits from unrelated folders in the same peer's share tree.
     """
-    if upload_speed < MIN_UPLOAD_SPEED or not audio_files:
+    if upload_speed < profile.min_upload_speed or not audio_files:
         return -1
 
-    file_scores = [_file_score(f) for f in audio_files]
+    file_scores = [_file_score(f, profile) for f in audio_files]
     valid        = [s for s in file_scores if s >= 0]
     if not valid:
         return -1
 
     base         = min(valid)                              # weakest link
-    speed_bonus  = min(int(upload_speed / MIN_UPLOAD_SPEED * 5), 50)  # up to +50
+    speed_bonus  = min(int(upload_speed / max(profile.min_upload_speed, 1) * 5), 50)  # up to +50
     count_bonus  = min(len(audio_files) * 2, 40)           # up to +40
 
     name_bonus = 0
@@ -465,11 +510,14 @@ def _split_query(query: str, artist: str, album: str) -> tuple[set[str], set[str
     return _tokens(query), set()
 
 def find_best_folder(responses: list, query: str = "",
-                      artist: str = "", album: str = "") -> Optional[FolderResult]:
+                      artist: str = "", album: str = "",
+                      profile: QualityProfile = MUSIC) -> Optional[FolderResult]:
     """Pick the highest-scoring (username, directory) folder from all responses.
     Pass `artist` + `album` (preferred) or `query` to enable folder-name match
     scoring — required to avoid picking a 1-file match from an unrelated album
-    when the peer also shares the requested album. See _folder_match_bonus()."""
+    when the peer also shares the requested album. See _folder_match_bonus().
+    Pass `profile=AUDIOBOOK` to relax format/bitrate/speed thresholds for
+    audiobook content (mp3 ≥ 24 kbps, m4a/m4b accepted, 0.5 MB/s floor)."""
     best_score = -1
     best: Optional[FolderResult] = None
     album_tokens, artist_tokens = _split_query(query, artist, album)
@@ -479,7 +527,7 @@ def find_best_folder(responses: list, query: str = "",
         upload_speed = resp.get("uploadSpeed", 0)
         files        = resp.get("files", [])
 
-        if upload_speed < MIN_UPLOAD_SPEED:
+        if upload_speed < profile.min_upload_speed:
             continue
 
         # Group files by parent directory
@@ -489,13 +537,14 @@ def find_best_folder(responses: list, query: str = "",
             folders.setdefault(d, []).append(f)
 
         for directory, dir_files in folders.items():
-            audio = [f for f in dir_files if _ext(f.get("filename", "")) in FORMAT_SCORES]
+            audio = [f for f in dir_files if _ext(f.get("filename", "")) in profile.format_scores]
             if not audio:
                 continue
 
             score = _score_folder(audio, upload_speed,
                                    album_tokens=album_tokens,
-                                   artist_tokens=artist_tokens)
+                                   artist_tokens=artist_tokens,
+                                   profile=profile)
             if score <= best_score:
                 continue
 
@@ -513,7 +562,8 @@ def find_best_folder(responses: list, query: str = "",
 
 
 def find_all_folders(responses: list, query: str = "",
-                      artist: str = "", album: str = "") -> list:
+                      artist: str = "", album: str = "",
+                      profile: QualityProfile = MUSIC) -> list:
     """Return all qualifying FolderResult objects sorted by score desc.
     Used for multi-source filling where different peers may have different tracks.
     Pass `artist` + `album` (preferred) or `query` to apply the same folder-name
@@ -527,7 +577,7 @@ def find_all_folders(responses: list, query: str = "",
         upload_speed = resp.get("uploadSpeed", 0)
         files        = resp.get("files", [])
 
-        if upload_speed < MIN_UPLOAD_SPEED:
+        if upload_speed < profile.min_upload_speed:
             continue
 
         folders: dict[str, list] = {}
@@ -541,13 +591,14 @@ def find_all_folders(responses: list, query: str = "",
                 continue
             seen.add(key)
 
-            audio = [f for f in dir_files if _ext(f.get("filename", "")) in FORMAT_SCORES]
+            audio = [f for f in dir_files if _ext(f.get("filename", "")) in profile.format_scores]
             if not audio:
                 continue
 
             score = _score_folder(audio, upload_speed,
                                    album_tokens=album_tokens,
-                                   artist_tokens=artist_tokens)
+                                   artist_tokens=artist_tokens,
+                                   profile=profile)
             if score < 0:
                 continue
 

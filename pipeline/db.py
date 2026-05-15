@@ -114,7 +114,8 @@ CREATE TABLE IF NOT EXISTS wishlist (
     last_attempt REAL,
     last_queued  REAL,
     fulfilled_at REAL,
-    note         TEXT NOT NULL DEFAULT ''
+    note         TEXT NOT NULL DEFAULT '',
+    kind         TEXT NOT NULL DEFAULT 'music'
 );
 CREATE TABLE IF NOT EXISTS schema_version (
     name        TEXT PRIMARY KEY,
@@ -166,6 +167,15 @@ def init_db():
     with _db() as con:
         con.executescript(_SCHEMA)
         _maybe_migrate(con)
+        _maybe_add_columns(con)
+
+
+def _maybe_add_columns(con):
+    """Add columns introduced after the original schema. ALTER TABLE ADD COLUMN
+    raises if the column already exists, so probe PRAGMA first."""
+    cols = {r[1] for r in con.execute('PRAGMA table_info(wishlist)')}
+    if 'kind' not in cols:
+        con.execute("ALTER TABLE wishlist ADD COLUMN kind TEXT NOT NULL DEFAULT 'music'")
 
 
 def _load_json_safe(path: Path) -> dict:
@@ -504,10 +514,13 @@ def prune_notify_queue(retain_days: int = 30) -> int:
 
 # ── wishlist ──────────────────────────────────────────────────────────────────
 
-def add_wishlist(artist: str, album: str, added_by: str = 'telegram') -> tuple[int, bool]:
+def add_wishlist(artist: str, album: str, added_by: str = 'telegram',
+                  kind: str = 'music') -> tuple[int, bool]:
     """
     Add an item to the wishlist.
     Returns (id, is_new) — is_new=False means it was already there.
+    `kind` selects the quality profile applied at search time
+    (currently 'music' or 'audiobook').
     """
     with _db() as con:
         existing = con.execute(
@@ -518,8 +531,8 @@ def add_wishlist(artist: str, album: str, added_by: str = 'telegram') -> tuple[i
         if existing:
             return existing['id'], False
         cur = con.execute(
-            'INSERT INTO wishlist (artist, album, added_at, added_by) VALUES (?,?,?,?)',
-            (artist, album, time.time(), added_by),
+            'INSERT INTO wishlist (artist, album, added_at, added_by, kind) VALUES (?,?,?,?,?)',
+            (artist, album, time.time(), added_by, kind),
         )
         return cur.lastrowid, True
 
@@ -527,7 +540,7 @@ def add_wishlist(artist: str, album: str, added_by: str = 'telegram') -> tuple[i
 def get_wishlist_pending() -> list[dict]:
     with _db() as con:
         rows = con.execute(
-            'SELECT id, artist, album, added_at, last_attempt, last_queued '
+            'SELECT id, artist, album, added_at, last_attempt, last_queued, kind '
             'FROM wishlist WHERE fulfilled_at IS NULL ORDER BY added_at'
         ).fetchall()
     return [dict(r) for r in rows]

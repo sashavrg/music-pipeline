@@ -365,10 +365,12 @@ def parse_album_query(text: str):
     return artist, album, None
 
 
-def process_query(rec, artist: str, album: str):
+def process_query(rec, artist: str, album: str, profile=None):
     # `rec` is the recover module (kept as a parameter for testability —
     # tests can pass a mock). Module-level `from . import recover` means
     # this is never None at runtime, so no defensive guard.
+    if profile is None:
+        profile = recover.MUSIC
     label = f"{artist} - {album}"
     query = f"{artist} {album}".strip()
     if len(query) > 60:
@@ -378,17 +380,20 @@ def process_query(rec, artist: str, album: str):
     if pending >= recover.MAX_PENDING_DL:
         return False, f"Queue is busy ({pending}/{recover.MAX_PENDING_DL}). Try again in a few minutes."
 
-    n_existing = recover.count_existing_tracks(artist, album)
+    # Audiobooks live outside the music library, so the dedup check that
+    # compares against beets is meaningless for them.
+    n_existing = 0 if profile is recover.AUDIOBOOK else recover.count_existing_tracks(artist, album)
     responses  = recover.slskd_search(query)
     if responses is None:
         return False, f"Search error for: {label}"
     if not responses:
         return False, f"No results found for: {label}"
 
-    best = recover.find_best_folder(responses, artist=artist, album=album)
+    best = recover.find_best_folder(responses, artist=artist, album=album, profile=profile)
     if best is None:
         return False, (
-            f"Found {len(responses)} response(s) for {label}, but none passed quality/speed filters."
+            f"Found {len(responses)} response(s) for {label}, but none passed "
+            f"quality/speed filters ({profile.name} profile)."
         )
 
     if n_existing > 0 and n_existing >= best.file_count:
@@ -402,8 +407,9 @@ def process_query(rec, artist: str, album: str):
         return False, f"Failed to queue download for: {label}"
 
     speed_mb = best.upload_speed / 1_000_000
+    profile_tag = f" [{profile.name}]" if profile is not recover.MUSIC else ""
     msg = (
-        f"Queued: {label}\n"
+        f"Queued{profile_tag}: {label}\n"
         f"User: {best.username}\n"
         f"Format: {best.fmt.upper()}\n"
         f"Files: {best.file_count}\n"
@@ -426,15 +432,16 @@ def _time_ago(ts: float | None) -> str:
     return f"{int(delta/86400)}d ago"
 
 
-def handle_wishlist_command(chat_id: str, args: str):
-    """Handle /wish [add | remove N | Artist - Album]"""
+def handle_wishlist_command(chat_id: str, args: str, kind: str = 'music'):
+    """Handle /wish [remove N | Artist - Album]. `kind` is 'music' or 'audiobook'."""
     args = args.strip()
+    cmd_label = '/bookwish' if kind == 'audiobook' else '/wish'
 
-    # /wish (no args) → list
+    # /wish (no args) → list (always shows everything, regardless of kind)
     if not args or args in ("list", "ls"):
         items = pipeline_db.get_wishlist_pending()
         if not items:
-            send_message(chat_id, "\U0001f4cb Wishlist is empty.\n\nAdd items with: /wish Artist - Album")
+            send_message(chat_id, f"\U0001f4cb Wishlist is empty.\n\nAdd items with: {cmd_label} Artist - Album")
             return
 
         lines = [f"\U0001f4cb Wishlist ({len(items)} items):"]
@@ -443,11 +450,12 @@ def handle_wishlist_command(chat_id: str, args: str):
             queued  = f", queued {_time_ago(item['last_queued'])}" if item.get('last_queued') else ""
             tried   = f", tried {_time_ago(item['last_attempt'])}" if item.get('last_attempt') else ""
             status  = queued or tried or ", not yet searched"
-            lines.append(f"  {item['id']}. {item['artist']} - {item['album']} ({added}{status})")
+            tag = " \U0001f4d6" if item.get('kind') == 'audiobook' else ""
+            lines.append(f"  {item['id']}.{tag} {item['artist']} - {item['album']} ({added}{status})")
         send_message(chat_id, "\n".join(lines))
         return
 
-    # /wish remove N or /wish done N
+    # /wish remove N (works the same regardless of kind)
     m = re.match(r'^(?:remove|rm|done|del)\s+(\d+)$', args, re.IGNORECASE)
     if m:
         wid = int(m.group(1))
@@ -456,24 +464,24 @@ def handle_wishlist_command(chat_id: str, args: str):
                      else f"No wishlist item with id {wid}.")
         return
 
-    # /wish Artist - Album
     if " - " not in args:
-        send_message(chat_id, "Use: /wish Artist - Album\nOr: /wish remove N")
+        send_message(chat_id, f"Use: {cmd_label} Artist - Album\nOr: /wish remove N")
         return
 
     artist, album = args.split(" - ", 1)
     artist = artist.strip()
     album  = album.strip()
     if not artist or not album:
-        send_message(chat_id, "Use: /wish Artist - Album")
+        send_message(chat_id, f"Use: {cmd_label} Artist - Album")
         return
 
-    wid, is_new = pipeline_db.add_wishlist(artist, album)
+    wid, is_new = pipeline_db.add_wishlist(artist, album, kind=kind)
     if is_new:
+        tag = "\U0001f4d6 audiobook " if kind == 'audiobook' else ""
         send_message(chat_id,
-                     f"\U0001f31f Added to wishlist: {artist} - {album} (id={wid})\n"
+                     f"\U0001f31f Added {tag}to wishlist: {artist} - {album} (id={wid})\n"
                      f"I'll search for it daily.")
-        log(f"Wishlist add #{wid}: {artist} - {album}")
+        log(f"Wishlist add #{wid} ({kind}): {artist} - {album}")
     else:
         send_message(chat_id, f"Already on wishlist: {artist} - {album} (id={wid})")
 
@@ -506,6 +514,8 @@ def handle_message(update: dict):
             "  /wish Artist - Album — add to wishlist\n"
             "  /wish — show wishlist\n"
             "  /wish remove N — remove wishlist item\n"
+            "  /book Author - Title — queue an audiobook (relaxed quality)\n"
+            "  /bookwish Author - Title — wishlist an audiobook\n"
             "  /status — pipeline status summary",
         )
         return
@@ -542,8 +552,33 @@ def handle_message(update: dict):
         send_message(chat_id, "\n".join(lines))
         return
 
+    if text.startswith("/bookwish"):
+        handle_wishlist_command(chat_id, text[len("/bookwish"):].strip(),
+                                kind='audiobook')
+        return
+
     if text.startswith("/wish"):
         handle_wishlist_command(chat_id, text[5:].strip())
+        return
+
+    if text.startswith("/book"):
+        body = text[len("/book"):].strip()
+        artist, album, err = parse_album_query(body)
+        if err:
+            send_message(chat_id, err)
+            return
+        if artist is None:
+            return
+        send_message(chat_id, f"\U0001f4d6 Searching audiobook (relaxed quality): {artist} - {album}")
+        try:
+            ok, result = process_query(recover, artist, album, profile=recover.AUDIOBOOK)
+            send_message(chat_id, result)
+            outcome = "queued" if ok else "not queued"
+            first_line = result.splitlines()[0] if result else ""
+            log(f"Audiobook request '{artist} - {album}' -> {outcome}: {first_line}")
+        except Exception as e:
+            log(f"Unhandled audiobook processing error: {e}\n{traceback.format_exc()}", "ERROR")
+            send_message(chat_id, "Unexpected error while processing request. Check server logs.")
         return
 
     if text.startswith("/"):
