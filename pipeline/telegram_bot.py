@@ -20,7 +20,12 @@ from . import recover
 LOG_FILE = str(cfg.TELEGRAM_BOT_LOG)
 
 TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-ALLOWED_CHAT_ID   = os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
+# TELEGRAM_ALLOWED_CHAT_ID accepts one id or a comma/space-separated list.
+ALLOWED_CHAT_IDS  = {
+    c.strip()
+    for c in re.split(r"[,\s]+", os.environ.get("TELEGRAM_ALLOWED_CHAT_ID", ""))
+    if c.strip()
+}
 POLL_TIMEOUT      = cfg.TELEGRAM_POLL_TIMEOUT
 POLL_WAIT         = cfg.TELEGRAM_POLL_WAIT
 OFFSET_FILE       = cfg.BOT_STATE_DIR / "offset"
@@ -28,7 +33,7 @@ MAX_MSG_LEN       = 3900
 
 if not TELEGRAM_TOKEN:
     raise SystemExit("TELEGRAM_BOT_TOKEN is required")
-if not ALLOWED_CHAT_ID:
+if not ALLOWED_CHAT_IDS:
     raise SystemExit("TELEGRAM_ALLOWED_CHAT_ID is required")
 
 API_BASE = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
@@ -496,7 +501,7 @@ def handle_message(update: dict):
     if not chat_id:
         return
 
-    if chat_id != ALLOWED_CHAT_ID:
+    if chat_id not in ALLOWED_CHAT_IDS:
         log(f"Rejected message from unauthorized chat_id={chat_id}", "WARN")
         return
 
@@ -668,7 +673,13 @@ def main():
                 log_msg, tg_text = render_notification(notif)
                 sent = True
                 if tg_text:
-                    sent = send_message(ALLOWED_CHAT_ID, tg_text)
+                    # Fan out to every allowed chat. Marked delivered only if all
+                    # succeed; a partial failure retries the whole batch (may
+                    # re-deliver to chats that already got it — acceptable at
+                    # this volume).
+                    sent = all(
+                        send_message(cid, tg_text) for cid in sorted(ALLOWED_CHAT_IDS)
+                    )
                 if sent:
                     pipeline_db.mark_delivered(ids)
                     if log_msg:
