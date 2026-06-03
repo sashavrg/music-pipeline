@@ -160,6 +160,19 @@ def folder_to_query(name: str) -> str:
         q = q[:60].rsplit(' ', 1)[0]
     return q
 
+
+# Mirrors fill_missing_tracks.is_generic_query — see slskd-pipeline-ops memory.
+# "Disc 2", "CD 1", bare numbers etc. match arbitrary albums' subfolders and
+# slskd writes the downloads into folders named after the *source* path,
+# spawning orphan complete/ entries.
+_GENERIC_QUERY_RE = re.compile(
+    r'^(?:\d{1,3}|(?:disc|cd|vol(?:ume)?)\s*\d{1,3})$',
+    re.IGNORECASE,
+)
+
+def is_generic_query(q: str) -> bool:
+    return bool(_GENERIC_QUERY_RE.match(q.strip()))
+
 # ── Beets / library check ─────────────────────────────────────────────────────
 
 _LIB_NOISE_RE = re.compile(
@@ -431,6 +444,19 @@ def main():
                 log(f'[REQUEUE-SKIP] queue busy ({pending}), will retry next cycle')
             else:
                 query = folder_to_query(name)
+                if is_generic_query(query):
+                    log(f'[REQUEUE-SKIP-GENERIC] {name} — query "{query}" too generic; '
+                        'would pull arbitrary disc subfolders and spawn orphans')
+                    pipeline_db.push_notification('incomplete_skip_generic', name,
+                                                  query=query, stalled_hours=round(total_age_h, 1))
+                    pipeline_db.upsert_incomplete_state(
+                        name, first_seen=first_seen,
+                        alerted=entry.get('alerted', False),
+                        requeued=entry.get('requeued', False),
+                        last_search_time=now,
+                        requeue_time=entry.get('requeue_time', ''),
+                    )
+                    continue
                 log(f'[REQUEUE] searching for: {query}')
                 responses = slskd_search(query)
                 new_requeued   = entry.get('requeued', False)
