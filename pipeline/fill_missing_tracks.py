@@ -103,6 +103,18 @@ def folder_to_query(name: str) -> str:
         q = q[:60].rsplit(' ', 1)[0]
     return q
 
+
+# Generic folder names that yield destructive search results: any "Disc 2",
+# "CD 1", "Vol 3", bare numbers etc. match arbitrary albums' disc subfolders
+# and cause slskd to queue unrelated material into orphan folders.
+_GENERIC_QUERY_RE = re.compile(
+    r'^(?:\d{1,3}|(?:disc|cd|vol(?:ume)?)\s*\d{1,3})$',
+    re.IGNORECASE,
+)
+
+def is_generic_query(q: str) -> bool:
+    return bool(_GENERIC_QUERY_RE.match(q.strip()))
+
 # ── Track-number extraction from slskd filenames ──────────────────────────────
 
 def track_num_from_filename(filename: str) -> int:
@@ -138,11 +150,22 @@ def assign_tracks_to_sources(all_folders: list, missing_set: set[int]) -> list:
     return source_files
 
 
-def fallback_assign(all_folders: list) -> list:
-    """When filenames lack track numbers, use the full top-scored folder."""
+def fallback_assign(all_folders: list, missing_set: set[int]) -> list:
+    """Used when assign_tracks_to_sources finds no exact track-number match.
+
+    Two cases:
+      a) Source filenames have detectable track numbers but none are in
+         missing_set — the source only carries tracks we already have, so
+         queueing it would re-download duplicates. Skip.
+      b) Source filenames lack any parseable track number — last-resort: pull
+         the whole top-scored folder.
+    """
     if not all_folders:
         return []
     best = all_folders[0]
+    detected = {track_num_from_filename(f.get('filename', '')) for f in best.files} - {0}
+    if detected and not (detected & missing_set):
+        return []  # source has nothing we're missing
     return [(best, best.files)]
 
 
@@ -207,6 +230,13 @@ def main():
 
         # ── Search ────────────────────────────────────────────────────────────
         query = folder_to_query(folder_name)
+        if is_generic_query(query):
+            log(f'[SKIP-GENERIC] {folder_name} — query "{query}" too generic; '
+                'would match arbitrary disc subfolders and pollute the queue')
+            skipped_no_tracks += 1
+            pipeline_db.push_notification('fill_skip_generic', folder_name,
+                                          query=query, missing=missing)
+            continue
         log(f'[SEARCH] query="{query}" for {len(missing)} missing track(s): {missing}')
 
         try:
@@ -238,9 +268,17 @@ def main():
         source_assignments = assign_tracks_to_sources(all_folders, missing_set)
 
         if not source_assignments:
-            # Filenames lack track numbers — fall back to full-folder from best source
-            log(f'[FALLBACK] {folder_name} — no track-number matches, queuing all files from best source')
-            source_assignments = fallback_assign(all_folders)
+            source_assignments = fallback_assign(all_folders, missing_set)
+            if source_assignments:
+                log(f'[FALLBACK] {folder_name} — filenames lack track numbers, '
+                    'queuing all files from best source')
+            else:
+                log(f'[NO-USEFUL-SOURCE] {folder_name} — best source only '
+                    'carries tracks already present; nothing to queue')
+                no_results += 1
+                pipeline_db.push_notification('fill_no_results', folder_name,
+                                              query=query, missing=missing)
+                continue
 
         # ── Queue from each source ─────────────────────────────────────────────
         cycle_queued_tracks: list[int] = []
