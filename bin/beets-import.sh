@@ -170,6 +170,12 @@ fi
 
 log "Starting beets import - ${#clean[@]} folders"
 _pre_import_count=$(sqlite3 /root/.config/beets/library.db "SELECT COUNT(*) FROM items;" 2>/dev/null || echo 0)
+# Watermark for the fulfillment hook below. MUST be MAX(id), not COUNT(*),
+# because items.id is autoincrement and `beet remove` leaves gaps — count
+# diverges from max within hours of any cleanup, so a COUNT-based watermark
+# would falsely include thousands of pre-existing items in the post-import
+# scan and risk false-positive wishlist fulfillment.
+_pre_import_maxid=$(sqlite3 /root/.config/beets/library.db "SELECT COALESCE(MAX(id), 0) FROM items;" 2>/dev/null || echo 0)
 if ! beet import -q --quiet-fallback=asis "${clean[@]}" >> "$LOG" 2>&1; then
     log "ERROR: beet import command failed"
     # Still attempt staged deletions check — import may have partially succeeded
@@ -239,6 +245,18 @@ with open(state_file, 'w', encoding='utf-8') as f:
 PY
 else
     log "[VERIFY] beet import added ${_added} item(s) to library (total: ${_post_import_count})"
+    # Mark any pending wishlist rows fulfilled by the newly-added items. Items
+    # with id > _pre_import_maxid are exactly what `beet import` just added.
+    python3 - "$_pre_import_maxid" <<'PY' 2>/dev/null | while IFS= read -r line; do log "$line"; done
+import os, sys
+sys.path.insert(0, os.environ.get('MUSIC_PIPELINE_ROOT', '/opt/music-pipeline'))
+from pipeline.wishlist_fulfillment import mark_fulfilled_since
+marked = mark_fulfilled_since(int(sys.argv[1]))
+for r in marked:
+    print(f'[WISHLIST-FULFILLED] #{r["id"]} {r["artist"]} - {r["album"]}')
+if marked:
+    print(f'[WISHLIST-FULFILLED] {len(marked)} row(s) marked fulfilled')
+PY
 fi
 
 # Note: do not run global 'beet move' here; it can touch stale DB entries and crash on missing paths.
