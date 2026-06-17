@@ -26,6 +26,7 @@ from pathlib import Path
 from . import config as cfg
 from . import db as pipeline_db
 from . import recover
+from . import slskdq
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -280,6 +281,24 @@ def main():
                                               query=query, missing=missing)
                 continue
 
+        # ── Phase-6 ledger: claim ONE in-flight slot for this album before the
+        #    multi-source loop (so the 2nd source isn't refused as in-flight
+        #    against the 1st). fill legitimately re-downloads tracks for an album
+        #    we partially own (skip_in_library) and runs its own 12h cooldown
+        #    (skip_cooldown); the ledger's value here is purely cross-producer
+        #    coordination. If the album is genuinely in flight via another
+        #    producer, skip — otherwise (unparseable name / capacity) degrade to
+        #    no claim rather than block fill.
+        _parts = folder_name.split(' - ', 1)
+        _fa = (_parts[0].strip(), _parts[1].strip()) if len(_parts) == 2 else ('', folder_name.strip())
+        fill_claim = slskdq.claim(_fa[0], _fa[1], source='fill', skip_in_library=True,
+                                  skip_cooldown=True, remote_dir=folder_name)
+        if not fill_claim.admitted:
+            if fill_claim.state == slskdq.REFUSED_INFLIGHT:
+                log(f'[LEDGER] skip {folder_name} — already in flight via another producer')
+                continue
+            fill_claim = None      # generic/capacity/etc: proceed without a ledger row
+
         # ── Queue from each source ─────────────────────────────────────────────
         cycle_queued_tracks: list[int] = []
         cycle_queued_files              = 0
@@ -326,6 +345,12 @@ def main():
             else:
                 errors += 1
                 log(f'[QUEUE-FAIL] {folder_name} from {source_folder.username}', 'WARN')
+
+        # Finalize the ledger claim: any_ok keeps the row live for poll() to
+        # terminalize; otherwise the claim is released (no cooldown).
+        if fill_claim is not None:
+            slskdq.settle(fill_claim.rowid, any_ok,
+                          note=f'{cycle_queued_files} file(s) from {len(source_assignments)} source(s)' if any_ok else '')
 
         if any_ok:
             queued += 1

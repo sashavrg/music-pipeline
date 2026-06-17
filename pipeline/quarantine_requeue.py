@@ -25,6 +25,7 @@ from pathlib import Path
 from . import config as cfg
 from . import db as pipeline_db
 from . import recover
+from . import slskdq
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -246,8 +247,15 @@ def main():
                 pipeline_db.upsert_quarantine_state(key, new_last_attempt, last_queued)
                 continue
 
-            ok = recover.queue_download(best)
-            if ok:
+            # Phase-6 gate: route through the slskd in-flight ledger. quarantine
+            # keeps its own 72h re-queue cooldown, so skip the ledger's cooldown
+            # (skip_cooldown) but honor in-library / in-flight / capacity. A
+            # refusal is not an error.
+            d = slskdq.enqueue(artist, album, source='quarantine',
+                               post=lambda: recover.queue_download(best),
+                               username=best.username, remote_dir=best.directory,
+                               file_count=best.file_count, skip_cooldown=True)
+            if d.admitted:
                 new_last_queued = now
                 requeued += 1
                 speed_mb = best.upload_speed / 1_000_000
@@ -261,9 +269,12 @@ def main():
                                               files=best.file_count, score=best.score,
                                               speed_mb=round(speed_mb, 1))
                 pipeline_db.upsert_quarantine_state(key, new_last_attempt, new_last_queued)
-            else:
+            elif d.state == slskdq.POST_FAILED:
                 errors += 1
                 log(f'[QUEUE-FAIL] {key}', 'WARN')
+                pipeline_db.upsert_quarantine_state(key, new_last_attempt, last_queued)
+            else:
+                log(f'[LEDGER] skip {key} — {d.reason}')
                 pipeline_db.upsert_quarantine_state(key, new_last_attempt, last_queued)
 
         except Exception as e:

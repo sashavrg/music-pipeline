@@ -323,6 +323,13 @@ def find_best_folder(responses: list):
                 best = (username, dir_key, dir_files, s)
     return best
 
+# Phase-6 NOTE: this producer is INTENTIONALLY exempt from the slskdq in-flight
+# ledger. The ledger gates ALBUM ACQUISITION (don't acquire what we already have
+# or are already acquiring). incomplete-watchdog operates one layer below that: it
+# RESCUES stalled in-progress transfers by re-POSTing them. The album it rescues
+# is, by definition, already in flight — so routing it through the identity
+# in-flight gate would make it refuse the very stalls it exists to clear. It keeps
+# its own per-folder incomplete_state cooldown + the local is_generic_query guard.
 def queue_download(username: str, files: list) -> bool:
     try:
         api_post(f'/api/v0/transfers/downloads/{urllib.parse.quote(username)}',
