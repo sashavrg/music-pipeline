@@ -86,6 +86,10 @@ SLSKD_API_KEY_PATH = _path("SLSKD_API_KEY_PATH", "/etc/slskd-api.key")
 # Each dir defaults to a child of SCRATCH_ROOT, but can be overridden individually
 # (matches the existing .env.example shape: SLSKD_COMPLETE_DIR, SLSKD_READY_DIR, ...).
 COMPLETE_DIR              = _path("SLSKD_COMPLETE_DIR",   str(SCRATCH_ROOT / "complete"))
+# UN-FUSED 2026-06-13 (rebuild phase 3): slskd now lands finished downloads here,
+# NOT in COMPLETE_DIR. No timer/watchdog sweeps INBOX_DIR; reconcile.py is its sole
+# reader. COMPLETE_DIR is retained only as the (now-unfed) legacy queue path.
+INBOX_DIR                 = _path("SLSKD_INBOX_DIR",      str(SCRATCH_ROOT / "inbox"))
 READY_DIR                 = _path("SLSKD_READY_DIR",      str(SCRATCH_ROOT / "ready"))
 INCOMPLETE_DIR            = _path("SLSKD_INCOMPLETE_DIR", str(SCRATCH_ROOT / "incomplete"))
 QUARANTINE_DIR            = _path("SLSKD_QUARANTINE_DIR", str(SCRATCH_ROOT / "quarantine"))
@@ -127,7 +131,7 @@ MAX_PENDING_DL   = _int("MAX_PENDING_DL", 100)
 # slskd search/poll behaviour (recover.py)
 SEARCH_DELAY    = _int("SEARCH_DELAY",    10)
 POLL_INTERVAL   = _int("POLL_INTERVAL",   4)
-SEARCH_TIMEOUT  = _int("SEARCH_TIMEOUT",  35)
+SEARCH_TIMEOUT  = _int("SEARCH_TIMEOUT",  50)  # slskd's own network timeout is ~40s; buffer past that before /responses fallback
 QUEUE_POLL_WAIT = _int("QUEUE_POLL_WAIT", 30)
 
 # Incomplete watchdog
@@ -146,3 +150,13 @@ FILL_MAX_SOURCES      = _int("FILL_MAX_SOURCES",      5)
 # Telegram bot
 TELEGRAM_POLL_TIMEOUT = _int("TELEGRAM_POLL_TIMEOUT", 45)
 TELEGRAM_POLL_WAIT    = _int("TELEGRAM_POLL_WAIT",    2)
+
+# slskd in-flight ledger (rebuild phase 6 — slskdq.py)
+# COMPLETED_SETTLE: after a successful download, don't re-queue this identity for
+#   this long — it's sitting in INBOX_DIR awaiting reconcile import; once imported,
+#   the in-library oracle refuses it anyway. FAILURE_COOLDOWN: back-off before
+#   retrying a failed/expired acquisition. STALE_EXPIRE: a live row absent from
+#   slskd's transfer list this long is presumed dropped -> mark expired (frees slot).
+LEDGER_COMPLETED_SETTLE_H = _int("LEDGER_COMPLETED_SETTLE_H", 24)
+LEDGER_FAILURE_COOLDOWN_H = _int("LEDGER_FAILURE_COOLDOWN_H", 12)
+LEDGER_STALE_EXPIRE_H     = _int("LEDGER_STALE_EXPIRE_H",     48)

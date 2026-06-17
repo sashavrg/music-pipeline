@@ -30,6 +30,7 @@ from typing import Optional
 
 from . import config as cfg
 from . import db as pipeline_db
+from . import slskdq
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -364,13 +365,20 @@ def slskd_search(query: str) -> Optional[list]:
         except Exception:
             continue
         if data.get("isComplete"):
-            api_delete(f"/api/v0/searches/{search_id}")
-            return data.get("responses", [])
+            responses = data.get("responses") or []
+            # slskd has a race between marking a search Complete (state=
+            # Completed,TimedOut at ~40s) and populating its detail-endpoint
+            # response cache. If the search is complete-but-empty here, fall
+            # through to the /responses endpoint which is the source of truth.
+            if responses:
+                api_delete(f"/api/v0/searches/{search_id}")
+                return responses
+            break
 
-    # Helper deadline elapsed before slskd marked the search complete.
-    # slskd only populates `responses[]` on the search detail endpoint after
-    # its own 40s network timeout, so fall back to the per-search /responses
-    # endpoint which returns whatever's arrived so far regardless of state.
+    # Either the helper deadline elapsed before slskd marked the search
+    # complete, or slskd marked it complete with the detail-endpoint cache
+    # still empty (race above). The per-search /responses endpoint returns
+    # whatever's arrived so far regardless of state.
     try:
         responses = api_get(f"/api/v0/searches/{search_id}/responses")
         api_delete(f"/api/v0/searches/{search_id}")
@@ -462,6 +470,78 @@ def _folder_match_bonus(folder_dir: str, album_tokens: set[str], artist_tokens: 
         bonus += len(artist_tokens & name_tokens) * 15
     return bonus
 
+
+# Artist-credit separators (case-insensitive, whitespace-flanked) used to
+# split folder names like "Chic & Sister Sledge - Greatest Hits" into the
+# segments belonging to each artist. Requires whitespace on both sides so we
+# don't tokenize on "&" inside an album title like "Salt&Pepper".
+#
+# Deliberately excludes 'and' and 'with' — too many legitimate album titles
+# use them ("Now and Then", "Songs to Sing with My Mother") and would be
+# falsely split. '&' alone covers the vast majority of real collab/VA cases.
+_ARTIST_CREDIT_SEPS_RE = re.compile(
+    r'\s+(?:&|feat\.?|featuring|vs\.?|presents)\s+',
+    re.IGNORECASE,
+)
+
+
+# Folder-name markers that indicate a Various-Artists compilation: VA-, V.A.,
+# "Various Artists", "Compilation" as a tagged word. Word boundaries on both
+# sides so we don't fire on band names containing these substrings.
+_VA_MARKER_RE = re.compile(
+    r'(?:^|[\s\-_\(\[])(?:v\.?a\.?|various\s*artists?|compilation)(?=[\s\-_\)\]]|$)',
+    re.IGNORECASE,
+)
+
+
+def _va_marker_penalty(folder_dir: str, artist_tokens: set[str]) -> int:
+    """If the folder name carries a VA-compilation marker (`VA-`, `V.A.`,
+    `Various Artists`, `Compilation`) but the user typed a specific artist,
+    penalize -80. Skip when the user actually requested VA content."""
+    if not artist_tokens:
+        return 0
+    # User explicitly asked for VA content -> no penalty.
+    if artist_tokens & {'various', 'artists', 'va', 'compilation'}:
+        return 0
+    name = PureWindowsPath(folder_dir).name
+    if _VA_MARKER_RE.search(name):
+        return -80
+    return 0
+
+
+def _unrequested_artist_penalty(folder_dir: str,
+                                 album_tokens: set[str],
+                                 artist_tokens: set[str]) -> int:
+    """Detect folders whose name lists *additional* artists the query didn't
+    ask for — VA compilations and unrelated collabs (the "Chic & Sister Sledge
+    Greatest Hits" failure mode). Returns a negative score adjustment.
+
+    Mechanism: split the folder name on artist-credit separators (`&`, `and`,
+    `feat`, `featuring`, `with`, `vs`, `presents`). For each post-separator
+    segment, check whether its tokens overlap *anything* in the query
+    (artist OR album). A segment with ZERO query overlap is presumed to be
+    an unrequested artist → penalize -60.
+
+    Carefully *does not* fire for legitimate duo credits like 'Marvin Gaye &
+    Tammi Terrell - United' (after MB expansion the duo's tokens are in
+    artist_tokens, so each segment overlaps) or 'Earth, Wind & Fire - I Am'
+    (the post-'&' segment 'Fire - I Am' has 'fire' in artist_tokens).
+    """
+    query_tokens = (album_tokens or set()) | (artist_tokens or set())
+    if not query_tokens:
+        return 0
+    name = PureWindowsPath(folder_dir).name
+    segments = _ARTIST_CREDIT_SEPS_RE.split(name)
+    if len(segments) < 2:
+        return 0
+    penalty = 0
+    # Skip segment 0 — it's the lead artist position, expected to match.
+    for seg in segments[1:]:
+        seg_tokens = _tokens(seg)
+        if seg_tokens and not (seg_tokens & query_tokens):
+            penalty -= 60
+    return penalty
+
 def _score_folder(audio_files: list, upload_speed: int,
                   album_tokens: set[str] | None = None,
                   artist_tokens: set[str] | None = None,
@@ -489,6 +569,8 @@ def _score_folder(audio_files: list, upload_speed: int,
     if album_tokens or artist_tokens:
         folder_dir = str(PureWindowsPath(audio_files[0].get("filename", "")).parent)
         name_bonus = _folder_match_bonus(folder_dir, album_tokens or set(), artist_tokens or set())
+        name_bonus += _unrequested_artist_penalty(folder_dir, album_tokens or set(), artist_tokens or set())
+        name_bonus += _va_marker_penalty(folder_dir, artist_tokens or set())
 
     return base + speed_bonus + count_bonus + name_bonus
 
@@ -794,15 +876,26 @@ def main():
                              "username": best.username, "format": best.fmt,
                              "files": best.file_count}
         else:
-            if queue_download(best):
+            # Phase-6 gate: the slskd in-flight ledger decides admit/refuse and
+            # only POSTs (via the post callable) when clear. Refusals (already in
+            # library / in flight / cooling / capacity) are NOT errors.
+            d = slskdq.enqueue(artist, album, source='recover',
+                               post=lambda: queue_download(best),
+                               username=best.username, remote_dir=best.directory,
+                               file_count=best.file_count)
+            if d.admitted:
                 log(f"  queued {best.file_count} files from {best.username}")
                 progress[key] = {"status": "queued", "label": label,
                                  "username": best.username, "format": best.fmt,
                                  "files": best.file_count, "score": best.score}
                 counts["queued"] += 1
-            else:
+            elif d.state == slskdq.POST_FAILED:
                 progress[key] = {"status": "error", "label": label}
                 counts["error"] += 1
+            else:
+                log(f"  [LEDGER] skip — {d.reason}")
+                progress[key] = {"status": "skipped", "label": label}
+                counts["skipped"] += 1
 
         save_progress(progress)
         time.sleep(SEARCH_DELAY)

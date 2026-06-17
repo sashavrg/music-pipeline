@@ -128,9 +128,53 @@ CREATE TABLE IF NOT EXISTS mb_album_cache (
     queried_at   REAL NOT NULL,
     PRIMARY KEY (artist_key, album_key)
 );
+-- Canonical release info (artist-credit phrase, release title, MBID) for the
+-- best-scoring MB release matching (artist, album). Used by the telegram bot's
+-- broad-query retry: when the bot's user-typed `artist album` query returns
+-- 0 results, retry with the MB-canonical artist credit + title. Cached
+-- 30 days, including negative results (NULL canonical_artist).
+CREATE TABLE IF NOT EXISTS mb_canonical_cache (
+    artist_key       TEXT NOT NULL,
+    album_key        TEXT NOT NULL,
+    canonical_artist TEXT,
+    canonical_title  TEXT,
+    canonical_mbid   TEXT,
+    canonical_score  INTEGER,
+    queried_at       REAL NOT NULL,
+    PRIMARY KEY (artist_key, album_key)
+);
 CREATE INDEX IF NOT EXISTS ix_notify_pending ON notify_queue (delivered_at) WHERE delivered_at IS NULL;
 CREATE INDEX IF NOT EXISTS ix_wishlist_pending ON wishlist (fulfilled_at) WHERE fulfilled_at IS NULL;
 CREATE INDEX IF NOT EXISTS ix_notify_delivered ON notify_queue (delivered_at) WHERE delivered_at IS NOT NULL;
+-- slskd in-flight ledger (rebuild phase 6) — the single identity-keyed table
+-- every producer must pass through before POSTing a download to slskd. Replaces
+-- the 5 per-stage cooldown tables that could not see each other's in-flight work
+-- (structural fault line #3 of the 2026-06-13 rethink). Keyed by identity (the
+-- same key reconcile/identity.py compute), NOT folder name, so the gate sees
+-- across producers and matches the library oracle. slskdq.py is its only writer.
+CREATE TABLE IF NOT EXISTS slskd_ledger (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity_key  TEXT    NOT NULL,
+    artist        TEXT    NOT NULL DEFAULT '',
+    album         TEXT    NOT NULL DEFAULT '',
+    source        TEXT    NOT NULL DEFAULT '',   -- producer: recover|incomplete|quarantine|fill|wishlist
+    username      TEXT    NOT NULL DEFAULT '',    -- slskd peer (for poll mapping)
+    remote_dir    TEXT    NOT NULL DEFAULT '',    -- slskd directory string (for poll mapping)
+    file_count    INTEGER NOT NULL DEFAULT 0,
+    state         TEXT    NOT NULL DEFAULT 'queued', -- queued|downloading|completed|failed|cancelled|expired
+    attempt       INTEGER NOT NULL DEFAULT 1,
+    queued_at     REAL    NOT NULL,
+    updated_at    REAL    NOT NULL,
+    terminal_at   REAL,                            -- set on reaching a terminal state (drives cooldown)
+    note          TEXT    NOT NULL DEFAULT ''
+);
+-- THE core invariant: at most ONE live (queued/downloading) row per identity.
+-- A partial-unique index makes the in-flight refusal race-proof at the schema
+-- level — a second producer's INSERT fails with IntegrityError, not a TOCTOU win.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_ledger_live_identity
+    ON slskd_ledger (identity_key) WHERE state IN ('queued','downloading');
+CREATE INDEX IF NOT EXISTS ix_ledger_state ON slskd_ledger (state);
+CREATE INDEX IF NOT EXISTS ix_ledger_identity ON slskd_ledger (identity_key);
 """
 
 # Notification events that can be batched when many arrive together
@@ -568,6 +612,130 @@ def remove_wishlist(wid: int) -> bool:
         return cur.rowcount > 0
 
 
+# ── slskd in-flight ledger (phase 6) ──────────────────────────────────────────
+# Storage only; the admission gate / state machine live in slskdq.py. Live states
+# (a download still in flight) are queued + downloading; everything else is
+# terminal. ledger_insert is the atomic in-flight claim: a duplicate live row for
+# the same identity is rejected by ux_ledger_live_identity (returns None).
+
+LEDGER_LIVE_STATES = ('queued', 'downloading')
+
+
+def ledger_live(identity_key: str):
+    """Return the live (queued/downloading) ledger row for an identity, or None."""
+    with _db() as con:
+        return con.execute(
+            "SELECT * FROM slskd_ledger WHERE identity_key=? "
+            "AND state IN ('queued','downloading') ORDER BY id DESC LIMIT 1",
+            (identity_key,),
+        ).fetchone()
+
+
+def ledger_insert(identity_key: str, artist: str, album: str, source: str,
+                  username: str = '', remote_dir: str = '',
+                  file_count: int = 0) -> int | None:
+    """Atomically claim the in-flight slot for an identity. Returns the new rowid,
+    or None if a live row already exists (the partial-unique index rejects it).
+    This is the race-proof in-flight gate — callers MUST treat None as 'refused,
+    already in flight' and NOT POST to slskd."""
+    now = time.time()
+    try:
+        with _db() as con:
+            cur = con.execute(
+                "INSERT INTO slskd_ledger "
+                "(identity_key, artist, album, source, username, remote_dir, "
+                " file_count, state, attempt, queued_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?, 'queued', 1, ?, ?)",
+                (identity_key, artist, album, source, username, remote_dir,
+                 int(file_count), now, now),
+            )
+            return cur.lastrowid
+    except sqlite3.IntegrityError:
+        return None
+
+
+def ledger_set_state(rowid: int, state: str, note: str | None = None):
+    """Transition a ledger row. terminal_at is stamped iff the new state is
+    terminal (anything other than queued/downloading), which arms cooldown."""
+    now = time.time()
+    terminal = 1 if state not in LEDGER_LIVE_STATES else 0
+    with _db() as con:
+        if note is None:
+            con.execute(
+                "UPDATE slskd_ledger SET state=?, updated_at=?, "
+                "terminal_at=CASE WHEN ?=1 THEN ? ELSE terminal_at END "
+                "WHERE id=?",
+                (state, now, terminal, now, rowid),
+            )
+        else:
+            con.execute(
+                "UPDATE slskd_ledger SET state=?, note=?, updated_at=?, "
+                "terminal_at=CASE WHEN ?=1 THEN ? ELSE terminal_at END "
+                "WHERE id=?",
+                (state, note, now, terminal, now, rowid),
+            )
+
+
+def ledger_live_rows() -> list:
+    """All currently-live rows, oldest first (for the poll state machine)."""
+    with _db() as con:
+        return con.execute(
+            "SELECT * FROM slskd_ledger WHERE state IN ('queued','downloading') "
+            "ORDER BY id"
+        ).fetchall()
+
+
+def ledger_last_terminal(identity_key: str):
+    """(state, terminal_at) of the most recent TERMINAL row for an identity, or
+    None. slskdq turns this into a cooldown decision (a just-completed download
+    awaiting import, or a recent failure to back off from)."""
+    with _db() as con:
+        r = con.execute(
+            "SELECT state, terminal_at FROM slskd_ledger WHERE identity_key=? "
+            "AND state NOT IN ('queued','downloading') AND terminal_at IS NOT NULL "
+            "ORDER BY terminal_at DESC LIMIT 1",
+            (identity_key,),
+        ).fetchone()
+    return (r['state'], r['terminal_at']) if r else None
+
+
+def ledger_delete(rowid: int) -> bool:
+    """Remove a ledger row outright. Used to roll back the in-flight claim when
+    the slskd POST itself fails (a transient API hiccup, not a download failure) —
+    no cooldown should be imposed, the next run retries immediately."""
+    with _db() as con:
+        cur = con.execute('DELETE FROM slskd_ledger WHERE id=?', (rowid,))
+        return cur.rowcount > 0
+
+
+def ledger_counts() -> dict:
+    """{state: count} histogram across the whole ledger (for --status)."""
+    with _db() as con:
+        rows = con.execute(
+            "SELECT state, COUNT(*) AS c FROM slskd_ledger GROUP BY state"
+        ).fetchall()
+    return {r['state']: r['c'] for r in rows}
+
+
+def ledger_recent(limit: int = 50) -> list:
+    with _db() as con:
+        return con.execute(
+            "SELECT * FROM slskd_ledger ORDER BY id DESC LIMIT ?", (int(limit),)
+        ).fetchall()
+
+
+def ledger_prune(retain_days: int = 30) -> int:
+    """Drop terminal rows older than retain_days. Live rows are never pruned."""
+    cutoff = time.time() - retain_days * 86400
+    with _db() as con:
+        cur = con.execute(
+            "DELETE FROM slskd_ledger WHERE state NOT IN ('queued','downloading') "
+            "AND updated_at < ?",
+            (cutoff,),
+        )
+        return cur.rowcount
+
+
 # ── MusicBrainz album-size cache ──────────────────────────────────────────────
 
 def _mb_key(s: str) -> str:
@@ -598,6 +766,51 @@ def upsert_mb_cache(artist: str, album: str, track_count):
             'INSERT OR REPLACE INTO mb_album_cache '
             '(artist_key, album_key, track_count, queried_at) VALUES (?,?,?,?)',
             (_mb_key(artist), _mb_key(album), track_count, time.time()),
+        )
+
+
+def get_canonical_cached(artist: str, album: str, ttl_seconds: float):
+    """
+    Return (canonical_dict_or_None, is_fresh) or None if no row exists.
+    canonical_dict has keys: artist_credit, title, mbid, score.
+    A row with NULL canonical_artist represents a cached negative — MB had no
+    confident match for this (artist, album). is_fresh=False means past TTL.
+    """
+    with _db() as con:
+        row = con.execute(
+            'SELECT canonical_artist, canonical_title, canonical_mbid, '
+            '       canonical_score, queried_at FROM mb_canonical_cache '
+            'WHERE artist_key=? AND album_key=?',
+            (_mb_key(artist), _mb_key(album)),
+        ).fetchone()
+    if not row:
+        return None
+    fresh = (time.time() - row['queried_at']) < ttl_seconds
+    if row['canonical_artist'] is None:
+        return (None, fresh)
+    canon = {
+        'artist_credit': row['canonical_artist'],
+        'title':         row['canonical_title'],
+        'mbid':          row['canonical_mbid'],
+        'score':         row['canonical_score'],
+    }
+    return (canon, fresh)
+
+
+def upsert_canonical_cache(artist: str, album: str, canon):
+    """canon is a dict {artist_credit,title,mbid,score} or None (negative)."""
+    if canon is None:
+        ca = ct = cm = cs = None
+    else:
+        ca, ct = canon.get('artist_credit'), canon.get('title')
+        cm, cs = canon.get('mbid'), canon.get('score')
+    with _db() as con:
+        con.execute(
+            'INSERT OR REPLACE INTO mb_canonical_cache '
+            '(artist_key, album_key, canonical_artist, canonical_title, '
+            ' canonical_mbid, canonical_score, queried_at) '
+            'VALUES (?,?,?,?,?,?,?)',
+            (_mb_key(artist), _mb_key(album), ca, ct, cm, cs, time.time()),
         )
 
 

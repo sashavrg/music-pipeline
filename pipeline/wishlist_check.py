@@ -16,6 +16,7 @@ from pathlib import Path
 from . import config as cfg
 from . import db as pipeline_db
 from . import recover
+from . import slskdq
 
 LOG_FILE     = cfg.WISHLIST_CHECK_LOG
 SEARCH_COOLDOWN_H = 24
@@ -109,8 +110,14 @@ def main():
             pipeline_db.update_wishlist_attempt(wid, now)
             continue
 
-        ok_flag = recover.queue_download(best)
-        if ok_flag:
+        # Phase-6 gate: route through the slskd in-flight ledger. The post
+        # callable performs the actual POST only when the gate admits; a refusal
+        # (already owned / in flight / cooling / capacity) is not an error.
+        d = slskdq.enqueue(artist, album, source='wishlist',
+                           post=lambda: recover.queue_download(best),
+                           username=best.username, remote_dir=best.directory,
+                           file_count=best.file_count)
+        if d.admitted:
             speed_mb = best.upload_speed / 1_000_000
             queued_count += 1
             log(
@@ -126,9 +133,12 @@ def main():
                 files=best.file_count, score=best.score,
                 speed_mb=round(speed_mb, 1),
             )
-        else:
+        elif d.state == slskdq.POST_FAILED:
             errors += 1
             log(f'[QUEUE-FAIL] #{wid} "{artist} - {album}"', 'WARN')
+            pipeline_db.update_wishlist_attempt(wid, now)
+        else:
+            log(f'[LEDGER] skip #{wid} "{artist} - {album}" — {d.reason}')
             pipeline_db.update_wishlist_attempt(wid, now)
 
         time.sleep(12)
