@@ -1,0 +1,37 @@
+name: tests
+
+# Runs the unit-test suite as a required gate. The pipeline encodes a lot of
+# hard-won invariants (generic-query skip, fallback dedup, wishlist fulfillment
+# watermark, quality scoring, MB canonical expansion) in tests/ — but until now
+# CI only built the Docker image and never ran them. This makes the suite a
+# merge gate so a regression in those invariants cannot ship.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # The tests import pipeline modules, which need the lightweight runtime
+      # deps (mutagen/pyyaml/requests/bs4). beets itself is shelled out to, not
+      # imported, so the heavy beets+plugins stack is not required to run tests.
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install mutagen pyyaml requests beautifulsoup4
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v

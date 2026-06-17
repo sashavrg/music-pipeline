@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Pre-commit gate: run the unit-test suite before allowing a commit.
+# Install: ln -sf ../../hooks/pre-commit .git/hooks/pre-commit
+# (the rebuild encodes invariants in tests/ — never commit a red suite)
+set -e
+echo "[pre-commit] running unit tests..."
+if ! python3 -m unittest discover -s tests >/tmp/pc-tests.log 2>&1; then
+    echo "[pre-commit] TESTS FAILED — commit aborted. See /tmp/pc-tests.log"
+    tail -15 /tmp/pc-tests.log
+    exit 1
+fi
+echo "[pre-commit] tests pass."
