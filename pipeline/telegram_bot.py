@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import config as cfg
 from . import db as pipeline_db
+from . import musicbrainz
 from . import recover
 
 LOG_FILE = str(cfg.TELEGRAM_BOT_LOG)
@@ -370,6 +371,41 @@ def parse_album_query(text: str):
     return artist, album, None
 
 
+def _build_query(artist: str, album: str) -> str:
+    """User-facing query format slskd searches against. Truncated to 60 chars
+    on a word boundary because slskd's distributed network drops very long
+    queries."""
+    q = f"{artist} {album}".strip()
+    if len(q) > 60:
+        q = q[:60].rsplit(" ", 1)[0]
+    return q
+
+
+def _mb_retry_query(artist: str, album: str, original_query: str, profile):
+    """
+    On a 0-result search, ask MusicBrainz for the canonical (artist, album)
+    and build a retry query if it would actually be different. Returns
+    (retry_query, canonical_label) or (None, None) if no retry is worth running.
+
+    Skipped for AUDIOBOOK — MB is a music-release DB and would only mislead.
+    """
+    if profile is recover.AUDIOBOOK:
+        return None, None
+    try:
+        canon = musicbrainz.lookup_canonical_release(artist, album)
+    except Exception as e:
+        log(f"MB canonical lookup failed for {artist} - {album}: {e}", "WARN")
+        return None, None
+    if not canon:
+        return None, None
+    retry_q = _build_query(canon['artist_credit'], canon['title'])
+    # No point retrying if MB canonicalises to the same words we already sent.
+    if retry_q.lower() == original_query.lower():
+        return None, None
+    canonical_label = f"{canon['artist_credit']} - {canon['title']}"
+    return retry_q, canonical_label
+
+
 def process_query(rec, artist: str, album: str, profile=None):
     # `rec` is the recover module (kept as a parameter for testability —
     # tests can pass a mock). Module-level `from . import recover` means
@@ -377,9 +413,7 @@ def process_query(rec, artist: str, album: str, profile=None):
     if profile is None:
         profile = recover.MUSIC
     label = f"{artist} - {album}"
-    query = f"{artist} {album}".strip()
-    if len(query) > 60:
-        query = query[:60].rsplit(" ", 1)[0]
+    query = _build_query(artist, album)
 
     pending = recover.pending_download_count()
     if pending >= recover.MAX_PENDING_DL:
@@ -391,8 +425,31 @@ def process_query(rec, artist: str, album: str, profile=None):
     responses  = recover.slskd_search(query)
     if responses is None:
         return False, f"Search error for: {label}"
+
+    # MusicBrainz retry: the bot's "{artist} {album}" query drops 0 results
+    # on collab albums (e.g. user types 'Marvin Gaye - United' but Soulseek
+    # only finds files credited to 'Marvin Gaye & Tammi Terrell'). Resolve
+    # the canonical artist-credit + title via MB and try once more.
+    retry_label = None
     if not responses:
-        return False, f"No results found for: {label}"
+        retry_q, retry_label = _mb_retry_query(artist, album, query, profile)
+        if retry_q:
+            log(f"MB retry: '{query}' -> '{retry_q}' ({retry_label})")
+            responses = recover.slskd_search(retry_q)
+            if responses is None:
+                return False, f"Search error for: {label}"
+            if responses:
+                # For downstream dedup, use the canonical artist/title once we
+                # actually matched on them — the canonical label is what gets
+                # imported into beets.
+                if retry_label:
+                    artist, album = retry_label.split(" - ", 1)
+                    label = retry_label
+                    n_existing = 0 if profile is recover.AUDIOBOOK else recover.count_existing_tracks(artist, album)
+
+    if not responses:
+        hint = f"\n(also tried MusicBrainz '{retry_label}' — no results)" if retry_label else ""
+        return False, f"No results found for: {label}{hint}"
 
     best = recover.find_best_folder(responses, artist=artist, album=album, profile=profile)
     if best is None:
@@ -421,6 +478,8 @@ def process_query(rec, artist: str, album: str, profile=None):
         f"Speed: {speed_mb:.1f} MB/s\n"
         f"Score: {best.score}"
     )
+    if retry_label:
+        msg += f"\n(Matched via MusicBrainz expansion.)"
     if n_existing:
         msg += f"\nLibrary already had {n_existing} track(s) (merge mode)."
     return True, msg
@@ -526,19 +585,28 @@ def handle_message(update: dict):
         return
 
     if text == "/scan":
-        result = subprocess.run(
-            ["systemctl", "is-active", "beets-import.service"],
-            capture_output=True, text=True,
+        # RETIRED 2026-06-14: /scan no longer starts the old ungated beets-import.service
+        # (systemctl disable did NOT block a manual start, so this was a reachable
+        # ungated writer). Imports now go through reconcile.py — the sole library writer
+        # / identity gate — which is dry-run by default and never writes from a chat
+        # command. /scan now just reports what's waiting in the inbox.
+        try:
+            inbox = str(cfg.INBOX_DIR)
+            folders = [d for d in os.listdir(inbox)
+                       if os.path.isdir(os.path.join(inbox, d)) and not d.startswith(("_", "."))]
+            n = str(len(folders))
+        except Exception:
+            n = "unknown"
+        send_message(
+            chat_id,
+            "Auto-import via /scan is retired — imports now go through the reconcile "
+            "gate (reconcile.py), which is dry-run by default and never writes from a "
+            "chat command.\n"
+            f"\U0001f4e5 Inbox folders awaiting reconcile: {n}\n"
+            "Dry-run plan:  python3 -m pipeline.reconcile --inbox\n"
+            "Execute (gated):  add --execute",
         )
-        if result.stdout.strip() == "active":
-            send_message(chat_id, "A beets import scan is already in progress.")
-        else:
-            subprocess.Popen(
-                ["systemctl", "start", "beets-import.service"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
-            )
-            send_message(chat_id, "Beets import scan triggered.")
-            log("Manual scan triggered via Telegram")
+        log("/scan reported inbox status (ungated beets-import path retired)")
         return
 
     if text == "/status":
