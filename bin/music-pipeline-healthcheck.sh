@@ -93,8 +93,16 @@ check_timer_active() {
     local timer="$1"
     if systemctl is-active --quiet "$timer"; then
         ok "timer active: $timer"
+    elif systemctl is-enabled --quiet "$timer" 2>/dev/null; then
+        # Enabled but not running = genuinely broken.
+        fail "timer enabled but inactive: $timer"
     else
-        fail "timer inactive: $timer"
+        # Disabled is a deliberate operator choice — e.g. the phased autonomy
+        # re-enable after the 2026 spine rebuild, where the acquisition timers
+        # come back one at a time behind the slskdq ledger, and beets-import is
+        # retired entirely (reconcile is now the sole writer). A disabled timer
+        # is not a health failure, so it must not page Telegram every cycle.
+        ok "timer disabled (intentional): $timer"
     fi
 }
 
@@ -252,30 +260,10 @@ check_recent_errors() {
         warn "quality-prefilter saw ${quality_warn_count} phantom library match(es) — check beets DB for stale rows"
     fi
 
-    # Check pipeline isn't idle — last import cycle should have run within 2h
-    local last_cycle_age
-    last_cycle_age=$(awk '/Import cycle finished|No files in import dir/{last=$1" "$2} END{print last}' "$BEETS_LOG" 2>/dev/null | \
-        python3 -c "
-import sys, time
-from datetime import datetime
-line = sys.stdin.read().strip()
-if not line:
-    print(9999)
-    sys.exit()
-try:
-    dt = datetime.strptime(line, '%Y-%m-%d %H:%M:%S')
-    print(int((time.time() - dt.timestamp()) / 60))
-except Exception:
-    print(9999)
-" 2>/dev/null)
-    if [ -z "$last_cycle_age" ]; then
-        last_cycle_age=9999
-    fi
-    if [ "$last_cycle_age" -gt 120 ]; then
-        warn "beets-import last ran ${last_cycle_age}min ago (>2h) — timer may be broken"
-    else
-        ok "beets-import last ran ${last_cycle_age}min ago"
-    fi
+    # NOTE: the old "beets-import last ran <2h ago, else timer may be broken"
+    # idle check was removed in the 2026 spine rebuild. There is no longer a
+    # fixed import cadence — reconcile.py is the sole, operator/timer-gated writer
+    # and a quiet import dir is the normal steady state, not a fault.
 }
 
 check_failed_units() {
