@@ -211,6 +211,9 @@ def parse_lost_albums(filepath: str) -> list[tuple[str, str]]:
     current_artist: Optional[str] = None
     in_section = False
 
+    if not os.path.isfile(filepath):
+        return albums
+
     with open(filepath, encoding="utf-8") as fh:
         for line in fh:
             line = line.rstrip()
@@ -768,6 +771,13 @@ def main():
 
     albums   = parse_lost_albums(LOST_ALBUMS_FILE)
     progress = {} if do_reset else load_progress()
+
+    if not albums:
+        if not os.path.isfile(LOST_ALBUMS_FILE):
+            log(f"recovery list not found at {LOST_ALBUMS_FILE} — nothing to do")
+        else:
+            log(f"recovery list {LOST_ALBUMS_FILE} parsed to 0 albums — nothing to do")
+        return 0
 
     if do_stats:
         print_stats(albums, progress)
