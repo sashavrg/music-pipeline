@@ -121,7 +121,10 @@ HEALTHCHECK_LOG         = LOG_DIR / "music-pipeline-health.log"
 ABS_AUTOMATCH_LOG       = LOG_DIR / "abs-automatch.log"
 
 # ─── Other library files ────────────────────────────────────────────────────
-LOST_ALBUMS_FILE = _str("LOST_ALBUMS_FILE", str(LIBRARY_ROOT / "LOST_ALBUMS.md"))
+# The recovery list lives in the music share root (one level above LIBRARY_ROOT,
+# which is itself .../music/music). The old default put it under LIBRARY_ROOT,
+# yielding a doubled .../music/music/LOST_ALBUMS.md that never existed.
+LOST_ALBUMS_FILE = _str("LOST_ALBUMS_FILE", str(LIBRARY_ROOT.parent / "LOST_ALBUMS.md"))
 
 # ─── Tuning constants (env-overridable, sane defaults) ─────────────────────
 # Soulseek peer filtering (shared by recover.py and incomplete-watchdog.py)
