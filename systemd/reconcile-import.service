@@ -1,0 +1,14 @@
+[Unit]
+Description=Import settled slskd downloads into the library through reconcile (the one gate), then refresh Plex
+After=network-online.target
+# reads INBOX_DIR on /mnt/scratch, writes the library on /mnt/storage — both are
+# systemd automounts, so don't run before they are present (avoids importing
+# into / or seeing an empty inbox on a stale mount).
+RequiresMountsFor=/mnt/scratch /mnt/storage
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/music-pipeline.env
+ExecStart=/usr/local/bin/reconcile-import
+StandardOutput=journal
+StandardError=journal
