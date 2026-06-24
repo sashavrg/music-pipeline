@@ -163,3 +163,8 @@ TELEGRAM_POLL_WAIT    = _int("TELEGRAM_POLL_WAIT",    2)
 LEDGER_COMPLETED_SETTLE_H = _int("LEDGER_COMPLETED_SETTLE_H", 24)
 LEDGER_FAILURE_COOLDOWN_H = _int("LEDGER_FAILURE_COOLDOWN_H", 12)
 LEDGER_STALE_EXPIRE_H     = _int("LEDGER_STALE_EXPIRE_H",     48)
+
+# Scheduled reconcile import (rebuild — consumer side, reconcile_import.py).
+# Only folders whose newest file settled at least this long ago are imported,
+# so an album still mid-download in INBOX_DIR is never picked up half-arrived.
+RECONCILE_IMPORT_MIN_AGE_MIN = _int("RECONCILE_IMPORT_MIN_AGE_MIN", 10)

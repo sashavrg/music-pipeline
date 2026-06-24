@@ -1,0 +1,11 @@
+[Unit]
+Description=Run reconcile import every 15 minutes
+Requires=reconcile-import.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Unit=reconcile-import.service
+
+[Install]
+WantedBy=timers.target
