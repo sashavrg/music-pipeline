@@ -1,5 +1,5 @@
 """
-MusicBrainz album-size lookup used by promote_ready when local tag-total
+MusicBrainz album-size lookup (telegram_bot canonical-release lookup) when local tag-total
 is missing and the gap heuristic can't fire (contiguous prefix of tracks).
 
 Fail-open: any network/parse error returns None, so callers fall back to

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run pipeline janitor weekly
+Requires=pipeline-janitor.service
+
+[Timer]
+OnCalendar=Mon *-*-* 06:00:00
+RandomizedDelaySec=30min
+Persistent=true
+Unit=pipeline-janitor.service
+
+[Install]
+WantedBy=timers.target

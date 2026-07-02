@@ -1,0 +1,10 @@
+[Unit]
+Description=Prune expired graveyard run-dirs and empty park shells
+RequiresMountsFor=/mnt/scratch
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/music-pipeline.env
+ExecStart=/usr/local/bin/pipeline-janitor
+StandardOutput=journal
+StandardError=journal
