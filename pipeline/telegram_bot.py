@@ -310,6 +310,16 @@ def render_notification(notif: dict) -> tuple[str | None, str | None]:
             f"✅ Cleanup: {count} incomplete folders removed (already in library)",
         )
 
+    if event == "quarantine_dead_letter":
+        key = notif.get("folder", "")
+        n = notif.get("attempts", "?")
+        return (
+            f"Dead-lettered {key} after {n} fruitless cycles",
+            f"\u26b0\ufe0f Quarantine gave up on \u201c{key}\u201d after {n} "
+            f"fruitless weekly cycles.\nMoved to unparsed/ \u2014 needs a human "
+            f"(bad tags / unfindable release).",
+        )
+
     if event == "weekly_digest":
         new_albums     = notif.get("new_albums", [])
         new_tracks     = notif.get("new_tracks", 0)
@@ -343,6 +353,26 @@ def render_notification(notif: dict) -> tuple[str | None, str | None]:
                 lines.append(f"  • {h['name']} ({h['age_h']:.0f}h)")
             if len(held) > 5:
                 lines.append(f"  … and {len(held) - 5} more")
+
+        parks = notif.get("parks", [])
+        parks_total = notif.get("parks_total", len(parks))
+        if parks_total:
+            lines.append(f"\n🅿️ Parked, waiting on you ({parks_total}):")
+            for p in parks[:6]:
+                why = f" — {p['reason']}" if p.get("reason") else ""
+                lines.append(f"  • {p['name']} ({p['age_days']:.0f}d, {p['n_files']}f){why}")
+            if parks_total > 6:
+                lines.append(f"  … and {parks_total - 6} more (pipeline-parks for the full list)")
+
+        stuck = notif.get("ledger_stuck", [])
+        if stuck:
+            lines.append(f"\n⏳ Ledger rows in flight >24h ({len(stuck)}):")
+            for r in stuck[:4]:
+                lines.append(f"  • {r['artist']} – {r['album']} [{r['state']}] {r['age_h']:.0f}h")
+
+        qfail = notif.get("quarantine_failing", 0)
+        if qfail:
+            lines.append(f"\n♻️ Quarantine items failing toward dead-letter: {qfail}")
 
         return (
             f"Sent weekly digest: {len(new_albums)} albums, {new_tracks} tracks",

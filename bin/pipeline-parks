@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""List every parked folder (the fail-to-review outbox), oldest first."""
+import os, sys
+sys.path.insert(0, os.environ.get("MUSIC_PIPELINE_ROOT", "/opt/music-pipeline"))
+from pipeline.parks import main
+sys.exit(main() or 0)

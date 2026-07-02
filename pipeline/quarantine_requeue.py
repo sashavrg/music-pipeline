@@ -46,6 +46,10 @@ LOG_FILE           = cfg.QUARANTINE_REQUEUE_LOG
 RETRY_COOLDOWN_H   = 168    # 7 days between search retries
 QUEUED_COOLDOWN_H  = 336    # 14 days cooldown after a successful queue
 MAX_PENDING_DL     = cfg.FILL_MAX_PENDING_DL
+# consecutive fruitless cycles (no results / no quality / gate-refused) before
+# an item stops being retried forever and retires to unparsed/ for a human.
+# At the weekly cadence the default is ~6 weeks of failures.
+DEAD_LETTER_AFTER  = int(os.environ.get('QUARANTINE_DEAD_LETTER_AFTER', '6'))
 
 AUDIO_EXTS = {'.flac', '.mp3', '.m4a', '.aac', '.ogg', '.opus',
               '.wav', '.alac', '.aiff', '.wma', '.ape', '.wv'}
@@ -168,6 +172,31 @@ def collect_folders() -> list[tuple[Path, str]]:
             items.append((entry, entry.name))
     return items
 
+# ── Dead-letter ───────────────────────────────────────────────────────────────
+
+def dead_letter(folder: Path, key: str, count: int) -> bool:
+    """Retire a terminally-fruitless item: move it to unparsed/ (which
+    collect_folders never scans) and notify ONCE. Without this, an item the
+    gate refuses forever is re-evaluated and re-refused weekly, invisibly,
+    forever. Returns True when the folder was moved."""
+    dest_dir = QUARANTINE_ROOT / 'unparsed'
+    dest = dest_dir / folder.name
+    if dest.exists():
+        dest = dest_dir / f'{folder.name}.dead-{int(time.time())}'
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        os.rename(str(folder), str(dest))
+    except OSError as e:
+        log(f'[WARN] dead-letter move failed for {folder}: {e}')
+        return False
+    pipeline_db.delete_quarantine_state(key)
+    pipeline_db.push_notification('quarantine_dead_letter', key,
+                                  attempts=count, moved_to=str(dest))
+    log(f'[DEAD-LETTER] {key} — {count} fruitless cycles, retired to unparsed/ '
+        f'(needs a human)')
+    return True
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -237,6 +266,17 @@ def main():
 
         log(f'[SEARCH] {key} | query="{query}"')
         new_last_attempt = now
+        fruitless = int(entry.get('fruitless', 0))
+
+        def _fruitless_cycle():
+            """One more cycle that can never succeed on its own; at the
+            threshold the item retires to unparsed/ instead of retrying
+            weekly forever."""
+            n = fruitless + 1
+            if n >= DEAD_LETTER_AFTER and dead_letter(folder, key, n):
+                return
+            pipeline_db.upsert_quarantine_state(key, new_last_attempt, last_queued,
+                                                fruitless=n)
 
         try:
             pending = recover.pending_download_count()
@@ -250,7 +290,7 @@ def main():
                 log(f'[NO-RESULTS] {key}')
                 no_results += 1
                 pipeline_db.push_notification('quarantine_no_results', key, query=query)
-                pipeline_db.upsert_quarantine_state(key, new_last_attempt, last_queued)
+                _fruitless_cycle()
                 continue
 
             best = recover.find_best_folder(responses, query=query)
@@ -258,7 +298,7 @@ def main():
                 log(f'[NO-QUALITY] {key} — results found but none passed quality filters')
                 no_results += 1
                 pipeline_db.push_notification('quarantine_no_results', key, query=query)
-                pipeline_db.upsert_quarantine_state(key, new_last_attempt, last_queued)
+                _fruitless_cycle()
                 continue
 
             # Phase-6 gate: route through the slskd in-flight ledger. quarantine
@@ -287,6 +327,11 @@ def main():
                 errors += 1
                 log(f'[QUEUE-FAIL] {key}', 'WARN')
                 pipeline_db.upsert_quarantine_state(key, new_last_attempt, last_queued)
+            elif d.state == slskdq.REFUSED_GENERIC:
+                # can never self-resolve: the query will be exactly as generic
+                # next week
+                log(f'[LEDGER] skip {key} — {d.reason}')
+                _fruitless_cycle()
             else:
                 log(f'[LEDGER] skip {key} — {d.reason}')
                 pipeline_db.upsert_quarantine_state(key, new_last_attempt, last_queued)

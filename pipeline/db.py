@@ -220,6 +220,12 @@ def _maybe_add_columns(con):
     cols = {r[1] for r in con.execute('PRAGMA table_info(wishlist)')}
     if 'kind' not in cols:
         con.execute("ALTER TABLE wishlist ADD COLUMN kind TEXT NOT NULL DEFAULT 'music'")
+    qcols = {r[1] for r in con.execute('PRAGMA table_info(quarantine_state)')}
+    if 'fruitless' not in qcols:
+        # consecutive fruitless re-queue cycles (no results / gate-refused); at
+        # the dead-letter threshold the folder retires to unparsed/ for a human
+        con.execute("ALTER TABLE quarantine_state ADD COLUMN "
+                    "fruitless INTEGER NOT NULL DEFAULT 0")
 
 
 def _load_json_safe(path: Path) -> dict:
@@ -386,20 +392,24 @@ def upsert_fill_attempt(folder_name: str, last_queued: float,
 def get_quarantine_state() -> dict:
     with _db() as con:
         rows = con.execute(
-            'SELECT key, last_attempt, last_queued FROM quarantine_state'
+            'SELECT key, last_attempt, last_queued, fruitless FROM quarantine_state'
         ).fetchall()
     return {r['key']: {'last_attempt': r['last_attempt'],
-                       'last_queued':  r['last_queued']} for r in rows}
+                       'last_queued':  r['last_queued'],
+                       'fruitless':    r['fruitless']} for r in rows}
 
 
-def upsert_quarantine_state(key: str, last_attempt: float, last_queued: float = 0):
+def upsert_quarantine_state(key: str, last_attempt: float, last_queued: float = 0,
+                            fruitless: int = 0):
     with _db() as con:
         con.execute(
-            'INSERT INTO quarantine_state VALUES (?,?,?,?) '
+            'INSERT INTO quarantine_state '
+            '(key, last_attempt, last_queued, updated_at, fruitless) '
+            'VALUES (?,?,?,?,?) '
             'ON CONFLICT(key) DO UPDATE SET '
             'last_attempt=excluded.last_attempt, last_queued=excluded.last_queued, '
-            'updated_at=excluded.updated_at',
-            (key, last_attempt, last_queued, time.time()),
+            'updated_at=excluded.updated_at, fruitless=excluded.fruitless',
+            (key, last_attempt, last_queued, time.time(), int(fruitless)),
         )
 
 
