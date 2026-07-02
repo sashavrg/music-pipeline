@@ -6,14 +6,17 @@ The rebuild automated the PRODUCER side (wishlist/recover/... queue downloads
 through the slskd ledger) but reconcile — the sole library writer — only ever
 ran by hand. This wraps it for unattended use:
 
-    1. run `reconcile --inbox --execute --min-age-min N` so settled downloads
+    1. poll the slskd in-flight ledger (slskdq.poll) so rows reach terminal
+       state on their own — without this, queued/downloading rows outlive their
+       transfers forever and only a manual `slskdq --poll` settles them;
+    2. run `reconcile --inbox --execute --min-age-min N` so settled downloads
        in INBOX_DIR flow into the beets library through the one gate (NEW /
        UPGRADE / DUPLICATE-discard / PARK-for-review — never a silent dup, never
        a hard delete);
-    2. if anything actually landed in the library (NEW or UPGRADE), trigger a
+    3. if anything actually landed in the library (NEW or UPGRADE), trigger a
        Plex Music-section refresh so it shows up without waiting for Plex's own
        scan;
-    3. surface parks (things that need human eyes) as a notification WITHOUT
+    4. surface parks (things that need human eyes) as a notification WITHOUT
        failing the systemd unit — a park is the gate working, not an error.
 
 DRY-RUN-by-default still lives in reconcile.py; this entrypoint always runs
@@ -80,6 +83,24 @@ def _plex_refresh() -> bool:
         return False
 
 
+def _ledger_poll() -> int:
+    """Advance live slskd-ledger rows to terminal state (slskdq.poll). Best
+    effort by design: in-library-at-admit is authoritative, so a missed poll
+    can't cause a dup — an slskd API hiccup here must never fail the import
+    run. Returns the number of transitions (0 on error)."""
+    try:
+        from . import slskdq
+        changes = slskdq.poll(execute=True)
+    except Exception as e:
+        log(f"[LEDGER] poll failed (non-fatal): {e}", "WARN")
+        return 0
+    for rowid, identity_key, old, new in changes:
+        log(f"[LEDGER] #{rowid} {old} -> {new}  {identity_key}")
+    if not changes:
+        log("[LEDGER] poll: no transitions")
+    return len(changes)
+
+
 def _prune_empty_dirs(inbox: Path, min_age_min: int) -> int:
     """Remove inbox subdirectories that contain NO files at all and have been
     settled at least min_age_min. A successful import moves an album's files out
@@ -127,6 +148,8 @@ def main(argv=None) -> int:
 
     log("===== reconcile-import start =====")
     log(f"inbox={cfg.INBOX_DIR} min_age_min={min_age} run_id={run_id}")
+
+    _ledger_poll()
 
     pruned = _prune_empty_dirs(Path(str(cfg.INBOX_DIR)), min_age)
     if pruned:

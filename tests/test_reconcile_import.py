@@ -86,6 +86,7 @@ class TestMainOrchestration(unittest.TestCase):
 
     def _run(self, summary, rc=0, raises=None):
         with mock.patch.object(RI, "setup_logging"), \
+             mock.patch.object(RI, "_ledger_poll", return_value=0) as poll, \
              mock.patch.object(RI, "_prune_empty_dirs", return_value=0), \
              mock.patch.object(RI, "_read_summary", return_value=summary), \
              mock.patch.object(RI, "_plex_refresh", return_value=True) as plex, \
@@ -131,6 +132,38 @@ class TestMainOrchestration(unittest.TestCase):
         self.assertEqual(ret, 0)
         plex.assert_not_called()
         notify.assert_not_called()
+
+
+class TestLedgerPoll(unittest.TestCase):
+    """The scheduled ledger poll: rows settle on their own each run, and a
+    slskd/API failure degrades to a warning — it must never fail the unit
+    (in-library-at-admit is authoritative, a missed poll can't dup)."""
+
+    def setUp(self):
+        RI._log_fh = None
+
+    def test_main_polls_ledger_every_run(self):
+        with mock.patch.object(RI, "setup_logging"), \
+             mock.patch.object(RI, "_ledger_poll", return_value=0) as poll, \
+             mock.patch.object(RI, "_prune_empty_dirs", return_value=0), \
+             mock.patch.object(RI, "_read_summary", return_value={}), \
+             mock.patch.object(RI, "_plex_refresh"), \
+             mock.patch.object(RI.pipeline_db, "push_notification"), \
+             mock.patch.object(RI.reconcile, "main", return_value=0):
+            self.assertEqual(RI.main([]), 0)
+        poll.assert_called_once()
+
+    def test_poll_transitions_are_counted(self):
+        changes = [(1, "ch:abc", "queued", "failed"),
+                   (2, "mbrg:def", "downloading", "completed")]
+        with mock.patch("pipeline.slskdq.poll", return_value=changes) as p:
+            self.assertEqual(RI._ledger_poll(), 2)
+        p.assert_called_once_with(execute=True)
+
+    def test_poll_failure_is_nonfatal(self):
+        with mock.patch("pipeline.slskdq.poll",
+                        side_effect=ConnectionError("slskd down")):
+            self.assertEqual(RI._ledger_poll(), 0)
 
 
 if __name__ == "__main__":
