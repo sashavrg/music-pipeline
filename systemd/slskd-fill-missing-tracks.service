@@ -1,6 +1,10 @@
 [Unit]
 Description=Fill missing tracks in held complete/ folders via slskd
 After=network-online.target
+# held folders live on /mnt/scratch; in-library check reads /mnt/storage.
+# Same boot-race guard as slskd-quarantine-requeue (timer stays disabled
+# until its own autonomy re-enable step).
+RequiresMountsFor=/mnt/scratch /mnt/storage
 
 [Service]
 Type=oneshot

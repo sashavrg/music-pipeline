@@ -1,6 +1,11 @@
 [Unit]
 Description=Re-queue stalled quarantined albums via slskd
 After=network-online.target
+# quarantine dir lives on /mnt/scratch; in-library check reads /mnt/storage.
+# Without this, a USB re-enumeration boot race runs the unit against an
+# absent mount (empty quarantine = silent no-op, empty library = false
+# not-in-library → needless re-acquisition).
+RequiresMountsFor=/mnt/scratch /mnt/storage
 
 [Service]
 Type=oneshot
