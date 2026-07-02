@@ -300,5 +300,45 @@ class TestClaimSettle(_DBTest):
         self.assertEqual(len(db.ledger_live_rows()), 2)
 
 
+class TestBusyLocalDirs(_DBTest):
+    """busy_local_dirs feeds reconcile-import's transfer-race shield: dirs with
+    live transfers + live ledger rows are busy; API-unreachable is None (unknown
+    ≠ empty — the caller must not sweep on None)."""
+
+    @staticmethod
+    def _payload():
+        return [
+            {'username': 'u1', 'directories': [
+                {'directory': 'Music\\Journey\\Live In Houston 1981',
+                 'files': [{'state': 'Completed, Succeeded'},
+                           {'state': 'InProgress'},
+                           {'state': 'Queued, Remotely'}]},
+                {'directory': 'Music\\Done\\All Finished Album',
+                 'files': [{'state': 'Completed, Succeeded'},
+                           {'state': 'Completed, Errored'}]},
+            ]},
+            {'username': 'u2', 'directories': [
+                {'directory': '@@x/share/Requested One',
+                 'files': [{'state': 'Requested'}]},
+            ]},
+        ]
+
+    def test_live_dirs_only_lowercased_basenames(self):
+        with mock.patch.object(Q, '_api_get', return_value=self._payload()):
+            busy = Q.busy_local_dirs()
+        self.assertEqual(busy, {'live in houston 1981', 'requested one'})
+
+    def test_live_ledger_rows_included(self):
+        db.ledger_insert('ch:aa', 'A', 'B', 'wishlist', 'u3',
+                         'peer\\stuff\\Ledger Only Dir', 5)
+        with mock.patch.object(Q, '_api_get', return_value=[]):
+            busy = Q.busy_local_dirs()
+        self.assertEqual(busy, {'ledger only dir'})
+
+    def test_api_unreachable_is_none_not_empty(self):
+        with mock.patch.object(Q, '_api_get', return_value=None):
+            self.assertIsNone(Q.busy_local_dirs())
+
+
 if __name__ == '__main__':
     unittest.main()

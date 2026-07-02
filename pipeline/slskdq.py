@@ -146,6 +146,31 @@ def _dirkey(s: str) -> str:
     return s.rsplit('/', 1)[-1]
 
 
+def busy_local_dirs() -> Optional[set]:
+    """Local download-folder names (lowercased basenames) that may still be
+    receiving files and must NOT be swept by reconcile: every slskd download
+    dir with a non-terminal file, plus the expected dir of every live ledger
+    row (covers the admit→first-transfer-record window). slskd quiesces the
+    local folder between per-file moves from its incomplete dir, so folder
+    mtime alone cannot distinguish "settled" from "mid-transfer" — this set is
+    the ground truth. Returns None when the transfers API is unreachable:
+    unknown is NOT the same as empty, and the caller must treat it as
+    unsafe-to-sweep."""
+    data = _api_get('/api/v0/transfers/downloads')
+    if not isinstance(data, list):
+        return None
+    busy = set()
+    for u in data:
+        for d in u.get('directories', []):
+            if any(_is_live_state(f.get('state', '')) for f in d.get('files', [])):
+                busy.add(_dirkey(d.get('directory', '')))
+    db.init_db()
+    for row in db.ledger_live_rows():
+        if row['remote_dir']:
+            busy.add(_dirkey(row['remote_dir']))
+    return busy
+
+
 def _dir_file_states(transfers: list, username: str, remote_dir: str) -> list:
     """slskd file-state strings for username+remote_dir, or [] if not present."""
     want = _dirkey(remote_dir)

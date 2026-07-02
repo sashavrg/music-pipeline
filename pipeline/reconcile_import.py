@@ -9,14 +9,21 @@ ran by hand. This wraps it for unattended use:
     1. poll the slskd in-flight ledger (slskdq.poll) so rows reach terminal
        state on their own — without this, queued/downloading rows outlive their
        transfers forever and only a manual `slskdq --poll` settles them;
-    2. run `reconcile --inbox --execute --min-age-min N` so settled downloads
-       in INBOX_DIR flow into the beets library through the one gate (NEW /
-       UPGRADE / DUPLICATE-discard / PARK-for-review — never a silent dup, never
-       a hard delete);
-    3. if anything actually landed in the library (NEW or UPGRADE), trigger a
+    2. compute the BUSY set (slskdq.busy_local_dirs): inbox folders slskd is
+       still downloading into. These are shielded from the sweep — slskd moves
+       files in one at a time from its incomplete dir, so a slow transfer's
+       folder looks mtime-settled between files and would be sliced into park
+       fragments (that happened: 2026-07-02, one album parked 4×). If the
+       transfers API is unreachable the busy set is UNKNOWN, and this run's
+       sweep is skipped entirely — unknown is not empty;
+    3. run `reconcile --inbox --execute --min-age-min N --skip-dir ...` so
+       settled downloads in INBOX_DIR flow into the beets library through the
+       one gate (NEW / UPGRADE / DUPLICATE-discard / PARK-for-review — never a
+       silent dup, never a hard delete);
+    4. if anything actually landed in the library (NEW or UPGRADE), trigger a
        Plex Music-section refresh so it shows up without waiting for Plex's own
        scan;
-    4. surface parks (things that need human eyes) as a notification WITHOUT
+    5. surface parks (things that need human eyes) as a notification WITHOUT
        failing the systemd unit — a park is the gate working, not an error.
 
 DRY-RUN-by-default still lives in reconcile.py; this entrypoint always runs
@@ -101,18 +108,34 @@ def _ledger_poll() -> int:
     return len(changes)
 
 
-def _prune_empty_dirs(inbox: Path, min_age_min: int) -> int:
+def _busy_dirs():
+    """Inbox folder names slskd may still be writing into (see module doc §2).
+    Returns a set of lowercased basenames, or None when the transfers API is
+    unreachable — the caller must then skip the sweep, not treat it as empty."""
+    try:
+        from . import slskdq
+        return slskdq.busy_local_dirs()
+    except Exception as e:
+        log(f"[BUSY] could not determine active downloads: {e}", "WARN")
+        return None
+
+
+def _prune_empty_dirs(inbox: Path, min_age_min: int, busy=()) -> int:
     """Remove inbox subdirectories that contain NO files at all and have been
     settled at least min_age_min. A successful import moves an album's files out
     (beets move:yes) and leaves the now-empty source dir behind; without this it
     would re-PARK as 'no-audio-files' on every run (notification noise). Only
-    truly empty trees are removed, so this can never lose audio."""
+    truly empty trees are removed, so this can never lose audio. Dirs in `busy`
+    (active downloads) are left alone — slskd may be about to move the first
+    file in."""
     if not inbox.is_dir():
         return 0
     cutoff = time.time() - min_age_min * 60
     removed = 0
     for child in sorted(inbox.iterdir()):
         if not child.is_dir() or child.name.startswith((".", "_")):
+            continue
+        if child.name.lower() in busy:
             continue
         files = [p for p in child.rglob("*") if p.is_file()]
         if files:
@@ -151,14 +174,24 @@ def main(argv=None) -> int:
 
     _ledger_poll()
 
-    pruned = _prune_empty_dirs(Path(str(cfg.INBOX_DIR)), min_age)
+    busy = _busy_dirs()
+    if busy is None:
+        log("[BUSY] slskd transfers unknown — skipping this run's sweep "
+            "(unknown ≠ empty; next timer fire retries)", "WARN")
+        log("===== reconcile-import done (skipped) =====")
+        return 0
+    if busy:
+        log(f"[BUSY] shielding {len(busy)} active download dir(s): {sorted(busy)}")
+
+    pruned = _prune_empty_dirs(Path(str(cfg.INBOX_DIR)), min_age, busy)
     if pruned:
         log(f"[CLEANUP] pruned {pruned} empty inbox dir(s)")
 
+    argv = ["--inbox", "--execute", "--min-age-min", str(min_age), "--run-id", run_id]
+    for name in sorted(busy):
+        argv += ["--skip-dir", name]
     try:
-        rc = reconcile.main(
-            ["--inbox", "--execute", "--min-age-min", str(min_age), "--run-id", run_id]
-        )
+        rc = reconcile.main(argv)
     except Exception as e:
         # A real failure (locked DB, precondition, crash) — let the unit fail so
         # it's visible. Parks are NOT routed here; they come back as rc==4 below.
