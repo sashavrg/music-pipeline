@@ -1,0 +1,41 @@
+#!/bin/sh
+# pipeline-db-backup — nightly snapshots of the two pipeline databases, OFF
+# the root SSD (both live there; the media itself is on /mnt/storage, so a
+# root-disk death without this loses every identity flexattr, ledger row and
+# wishlist while the music survives).
+#
+# sqlite3 .backup is used (not cp): it takes a consistent snapshot of a live
+# WAL database. Retention: newest $KEEP per DB (default 14).
+set -eu
+
+DEST="${PIPELINE_BACKUP_DIR:-/mnt/storage/backups/music-pipeline}"
+KEEP="${PIPELINE_BACKUP_KEEP:-14}"
+BEETS_DB="${BEETS_DB:-/root/.config/beets/library.db}"
+PIPELINE_DB="${PIPELINE_DB:-/var/lib/pipeline/pipeline.db}"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+
+mkdir -p "$DEST"
+
+backup_one() {
+    src="$1"; name="$2"
+    [ -f "$src" ] || { echo "SKIP: $src missing"; return 0; }
+    out="$DEST/$name.$STAMP.db"
+    sqlite3 "$src" ".backup '$out'"
+    # integrity of the SNAPSHOT (never write-locks the live DB)
+    ok="$(sqlite3 "$out" 'PRAGMA quick_check;')"
+    if [ "$ok" != "ok" ]; then
+        echo "FAIL: $name snapshot quick_check: $ok" >&2
+        rm -f "$out"
+        return 1
+    fi
+    gzip -f "$out"
+    echo "OK: $name -> $out.gz ($(du -h "$out.gz" | cut -f1))"
+    # retention: keep newest $KEEP
+    ls -1t "$DEST/$name".*.db.gz 2>/dev/null | tail -n "+$((KEEP + 1))" |
+        while IFS= read -r old; do rm -f "$old" && echo "pruned: $old"; done
+}
+
+rc=0
+backup_one "$BEETS_DB" "library" || rc=1
+backup_one "$PIPELINE_DB" "pipeline" || rc=1
+exit "$rc"

@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly snapshot of beets library.db + pipeline.db to /mnt/storage
+# destination is on /mnt/storage — without this a USB boot race would "succeed"
+# into an unmounted stub dir on the root SSD
+RequiresMountsFor=/mnt/storage
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/music-pipeline.env
+ExecStart=/usr/local/bin/pipeline-db-backup
+StandardOutput=journal
+StandardError=journal
