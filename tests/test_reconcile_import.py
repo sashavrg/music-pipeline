@@ -84,9 +84,10 @@ class TestMainOrchestration(unittest.TestCase):
     def setUp(self):
         RI._log_fh = None
 
-    def _run(self, summary, rc=0, raises=None):
+    def _run(self, summary, rc=0, raises=None, busy=frozenset()):
         with mock.patch.object(RI, "setup_logging"), \
              mock.patch.object(RI, "_ledger_poll", return_value=0) as poll, \
+             mock.patch.object(RI, "_busy_dirs", return_value=busy), \
              mock.patch.object(RI, "_prune_empty_dirs", return_value=0), \
              mock.patch.object(RI, "_read_summary", return_value=summary), \
              mock.patch.object(RI, "_plex_refresh", return_value=True) as plex, \
@@ -132,6 +133,67 @@ class TestMainOrchestration(unittest.TestCase):
         self.assertEqual(ret, 0)
         plex.assert_not_called()
         notify.assert_not_called()
+
+
+class TestBusyShield(unittest.TestCase):
+    """The transfer-race guard: a folder slskd is still downloading into must
+    never be swept (2026-07-02: one album was sliced into 4 park fragments
+    because mtime-settling can't see slskd's between-file quiescence). Busy
+    dirs are passed to reconcile as --skip-dir; an unknown busy set (API down)
+    skips the whole sweep — unknown is not empty."""
+
+    def setUp(self):
+        RI._log_fh = None
+
+    def _main(self, busy):
+        with mock.patch.object(RI, "setup_logging"), \
+             mock.patch.object(RI, "_ledger_poll", return_value=0), \
+             mock.patch.object(RI, "_busy_dirs", return_value=busy), \
+             mock.patch.object(RI, "_prune_empty_dirs", return_value=0) as prune, \
+             mock.patch.object(RI, "_read_summary", return_value={}), \
+             mock.patch.object(RI, "_plex_refresh"), \
+             mock.patch.object(RI.pipeline_db, "push_notification"), \
+             mock.patch.object(RI.reconcile, "main", return_value=0) as rmain:
+            ret = RI.main([])
+        return ret, rmain, prune
+
+    def test_busy_dirs_become_skip_dir_args(self):
+        ret, rmain, prune = self._main({"journey live", "cool kids"})
+        self.assertEqual(ret, 0)
+        argv = rmain.call_args[0][0]
+        self.assertEqual(argv.count("--skip-dir"), 2)
+        self.assertIn("journey live", argv)
+        self.assertIn("cool kids", argv)
+        # prune also receives the shield
+        self.assertEqual(prune.call_args[0][2], {"journey live", "cool kids"})
+
+    def test_unknown_busy_set_skips_sweep_without_failing(self):
+        ret, rmain, prune = self._main(None)
+        self.assertEqual(ret, 0)          # skipped, not failed — timer retries
+        rmain.assert_not_called()
+        prune.assert_not_called()
+
+    def test_empty_busy_set_sweeps_normally(self):
+        ret, rmain, _ = self._main(set())
+        self.assertEqual(ret, 0)
+        rmain.assert_called_once()
+        self.assertNotIn("--skip-dir", rmain.call_args[0][0])
+
+    def test_busy_dirs_helper_none_on_api_error(self):
+        with mock.patch("pipeline.slskdq.busy_local_dirs",
+                        side_effect=ConnectionError("slskd down")):
+            self.assertIsNone(RI._busy_dirs())
+
+    def test_prune_skips_busy_dir(self):
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="ri-busy-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        active = _mkdir(tmp, "Active Album", age_min=30)     # empty AND settled
+        stale = _mkdir(tmp, "Done Album", age_min=30)
+        n = RI._prune_empty_dirs(Path(tmp), min_age_min=10, busy={"active album"})
+        self.assertEqual(n, 1)
+        self.assertTrue(active.exists())   # shielded despite being empty+old
+        self.assertFalse(stale.exists())
 
 
 class TestLedgerPoll(unittest.TestCase):

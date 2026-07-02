@@ -330,5 +330,31 @@ class TestExecuteWiring(unittest.TestCase):
         self.assertFalse(res.get('moved'))  # read_only_source -> no move either
 
 
+class TestListCandidateDirs(unittest.TestCase):
+    """--skip-dir shields active downloads from the sweep (transfer-race guard);
+    matching is case-insensitive on basenames, _/. dirs stay excluded."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix='recon-lcd-')
+        self.addCleanup(lambda: __import__('shutil').rmtree(self.tmp, ignore_errors=True))
+        for d in ('Journey Live', 'Settled Album', '_parked', '.hidden'):
+            os.makedirs(os.path.join(self.tmp, d))
+        with open(os.path.join(self.tmp, 'loose-file.flac'), 'w'):
+            pass
+
+    def _names(self, skip=()):
+        return [os.path.basename(p) for p in R._list_candidate_dirs(self.tmp, skip)]
+
+    def test_default_excludes_underscore_dot_and_files(self):
+        self.assertEqual(self._names(), ['Journey Live', 'Settled Album'])
+
+    def test_skip_is_case_insensitive(self):
+        self.assertEqual(self._names(skip=['journey live']), ['Settled Album'])
+
+    def test_empty_skip_keeps_all(self):
+        self.assertEqual(len(self._names(skip=[])), 2)
+
+
 if __name__ == '__main__':
     unittest.main()

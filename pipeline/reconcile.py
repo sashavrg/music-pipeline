@@ -1180,6 +1180,19 @@ def _settled(folder: str, min_age_min: int) -> bool:
     return True
 
 
+def _list_candidate_dirs(source: str, skip_names=()) -> list:
+    """Candidate folders under source: real dirs, not _/.-prefixed, and not in
+    skip_names (case-insensitive basenames). reconcile-import passes the dirs
+    slskd is still downloading into — slskd quiesces a folder between per-file
+    moves, so mtime alone would sweep a mid-transfer album as a fragment."""
+    skip = {s.lower() for s in skip_names}
+    return sorted(
+        os.path.join(source, d) for d in os.listdir(source)
+        if os.path.isdir(os.path.join(source, d))
+        and not d.startswith('_') and not d.startswith('.')
+        and d.lower() not in skip)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="reconcile.py — the one gate / one writer (DRY-RUN default)")
     src = ap.add_mutually_exclusive_group()
@@ -1189,6 +1202,10 @@ def main(argv=None) -> int:
     ap.add_argument('--execute', action='store_true', help='WRITE (gated; default is dry-run)')
     ap.add_argument('--trust-folder-names', action='store_true')
     ap.add_argument('--min-age-min', type=int, default=10)
+    ap.add_argument('--skip-dir', action='append', default=[], metavar='NAME',
+                    help='folder basename to exclude from this run (repeatable, '
+                         'case-insensitive); reconcile-import shields active '
+                         'slskd downloads with this')
     ap.add_argument('--db', default=BEETS_DB)
     ap.add_argument('--run-id', default='run')
     args = ap.parse_args(argv)
@@ -1208,9 +1225,7 @@ def main(argv=None) -> int:
             top = write_plan(plan, run_dir, mode, args.db)
             print_plan_table(plan, mode)
         else:
-            folders = sorted(
-                os.path.join(source, d) for d in os.listdir(source)
-                if os.path.isdir(os.path.join(source, d)) and not d.startswith('_') and not d.startswith('.'))
+            folders = _list_candidate_dirs(source, args.skip_dir)
             if mode != 'backlog':
                 kept = [f for f in folders if _settled(f, args.min_age_min)]
             else:
