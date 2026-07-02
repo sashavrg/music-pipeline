@@ -1,0 +1,33 @@
+#!/bin/sh
+# pipeline-janitor — retention for the pipeline's disposable holding areas.
+#
+# ONLY the scratch graveyard is subject to retention: it holds discarded
+# DUPLICATES the gate already decided against, kept briefly so a bad call is
+# reversible. Parks are a HUMAN review queue and the library graveyard holds
+# retired originals — neither is ever auto-deleted here; only their empty
+# per-run shells are removed.
+set -eu
+
+SCRATCH_ROOT="${SCRATCH_ROOT:-/mnt/scratch/slskd}"
+GRAVEYARD="$SCRATCH_ROOT/_graveyard"
+PARKED="$SCRATCH_ROOT/_parked"
+KEEP_DAYS="${JANITOR_GRAVEYARD_KEEP_DAYS:-60}"
+
+if [ -d "$GRAVEYARD" ]; then
+    find "$GRAVEYARD" -mindepth 1 -maxdepth 1 -type d -mtime "+$KEEP_DAYS" |
+        while IFS= read -r d; do
+            rm -rf "$d"
+            echo "pruned graveyard run-dir (>${KEEP_DAYS}d): $d"
+        done
+fi
+
+# empty per-run shells only — never a dir with content
+for root in "$GRAVEYARD" "$PARKED"; do
+    [ -d "$root" ] || continue
+    find "$root" -mindepth 1 -maxdepth 1 -type d -empty |
+        while IFS= read -r d; do
+            rmdir "$d" && echo "removed empty run-dir: $d"
+        done
+done
+
+echo "janitor done"

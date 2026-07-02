@@ -2,7 +2,7 @@
 """identity.py — the SINGLE source of truth for "which release is this?"
 
 Replaces the 4 divergent in_library/count matchers (recover.count_existing_tracks,
-quarantine.in_library, promote_ready.library_track_count, incomplete_watchdog.in_library)
+quarantine.in_library, the retired promote_ready, incomplete_watchdog.in_library)
 and the 2 operator dedup matchers. Designed + red-teamed against the live library
 (see memory: music-pipeline-rethink; spec validated on 1142 albums / 11693 items).
 

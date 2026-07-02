@@ -11,10 +11,11 @@ LOG_FILE="$LOG_DIR/music-pipeline-health.log"
 BEETS_LOG="$LOG_DIR/beets-import.log"
 case "${LOG_TO_STDOUT:-}" in 1|true|yes|on|TRUE|YES|ON) LOG_FILE=/dev/stdout ;; esac
 COMPLETE_DIR="${SLSKD_COMPLETE_DIR:-$SCRATCH_ROOT/complete}"
+INBOX_DIR="${SLSKD_INBOX_DIR:-$SCRATCH_ROOT/inbox}"
+PIPELINE_DB="${PIPELINE_DB:-/var/lib/pipeline/pipeline.db}"
 INCOMPLETE_DIR="${SLSKD_INCOMPLETE_DIR:-$SCRATCH_ROOT/incomplete}"
 QUARANTINE_DIR="${SLSKD_QUARANTINE_DIR:-$SCRATCH_ROOT/quarantine}"
 CHECKER="/usr/local/bin/check-chromaprint"
-IMPORTER="/usr/local/bin/beets-import.sh"
 WARN_STAMP="$HEALTHCHECK_STATE_DIR/warn-notified.stamp"
 WARN_COOLDOWN_H=24
 WARN_COUNT=0
@@ -106,29 +107,6 @@ check_timer_active() {
     fi
 }
 
-check_beets_stale_runtime() {
-    local pids
-    local stale=0
-    pids=$(pgrep -f "/usr/local/bin/beets-import.sh" || true)
-    if [ -z "$pids" ]; then
-        ok "beets importer not currently running (normal between timer runs)"
-        return
-    fi
-
-    for pid in $pids; do
-        local etime
-        etime=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d " ")
-        if [ -n "$etime" ] && [ "$etime" -gt 14400 ]; then
-            stale=1
-            warn "beets importer pid=$pid running for ${etime}s (>4h)"
-        fi
-    done
-
-    if [ "$stale" -eq 0 ]; then
-        ok "beets importer runtime within expected bounds"
-    fi
-}
-
 # slskd-recover is a batch script, not a daemon — not running is normal.
 # Only flag if it has been failing (exited non-zero recently).
 check_recover_status() {
@@ -142,18 +120,39 @@ check_recover_status() {
 }
 
 check_backlog() {
-    # ── complete/ dir ──────────────────────────────────────────────────────────
-    if [ ! -d "$COMPLETE_DIR" ]; then
-        fail "cannot inspect complete/ backlog — missing $COMPLETE_DIR"
+    # ── inbox/ dir (the base-function canary) ─────────────────────────────────
+    # A settled inbox folder should flow to the library within one or two
+    # 15-min reconcile-import cycles. One sitting >24h means the consumer is
+    # broken or the folder is invisibly stuck (the Level 42 failure mode) —
+    # unless slskd is still downloading into it, which the busy-shield covers
+    # and a >24h transfer then trips the ledger check below instead.
+    if [ ! -d "$INBOX_DIR" ]; then
+        fail "cannot inspect inbox — missing $INBOX_DIR"
     else
-        local total_count stuck_count
-        total_count=$(find "$COMPLETE_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
-        # Folders older than 12h that haven't been promoted are genuinely stuck
-        stuck_count=$(find "$COMPLETE_DIR" -mindepth 1 -maxdepth 1 -type d -mmin +720 2>/dev/null | wc -l)
-        if [ "$stuck_count" -gt 5 ]; then
-            warn "complete/ has ${stuck_count} folder(s) older than 12h (total ${total_count}) — pipeline may be stalled"
+        local in_total in_stuck
+        in_total=$(find "$INBOX_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+        in_stuck=$(find "$INBOX_DIR" -mindepth 1 -maxdepth 1 -type d -mmin +1440 2>/dev/null | wc -l)
+        if [ "$in_stuck" -gt 0 ]; then
+            warn "inbox has ${in_stuck} folder(s) older than 24h (total ${in_total}) — downloads may be stranded"
         else
-            ok "complete/ backlog: total=${total_count}, stuck_12h=${stuck_count}"
+            ok "inbox: total=${in_total}, none older than 24h"
+        fi
+    fi
+
+    # ── slskd ledger: live rows the poll should have expired ─────────────────
+    # STALE_EXPIRE is 48h; a live row past 54h means the scheduled poll is not
+    # advancing states (or nothing is running it) — the exact failure that let
+    # the first production wishlist row sit 'queued' for 6 days.
+    if [ -f "$PIPELINE_DB" ]; then
+        local stuck_rows
+        stuck_rows=$(sqlite3 "$PIPELINE_DB" \
+            "SELECT COUNT(*) FROM slskd_ledger WHERE state IN ('queued','downloading') AND queued_at < strftime('%s','now') - 54*3600;" 2>/dev/null || echo "")
+        if [ -z "$stuck_rows" ]; then
+            warn "could not query slskd_ledger in $PIPELINE_DB"
+        elif [ "$stuck_rows" -gt 0 ]; then
+            fail "ledger has ${stuck_rows} live row(s) older than 54h — poll not expiring states"
+        else
+            ok "ledger: no live rows older than 54h"
         fi
     fi
 
@@ -295,9 +294,8 @@ check_temperature() {
 
     if [ "$max_temp" -ge "$TEMP_CRITICAL" ]; then
         fail "CPU critically hot: ${max_temp}°C — stopping pipeline processes"
-        systemctl stop beets-import.service 2>/dev/null || true
         pkill -f "pipeline.recover\|slskd-recover" 2>/dev/null || true
-        log_line "FAIL" "beets-import stopped and slskd-recover killed due to thermal emergency"
+        log_line "FAIL" "slskd-recover killed due to thermal emergency"
     elif [ "$max_temp" -ge "$TEMP_WARN" ]; then
         warn "CPU temperature elevated: ${max_temp}°C"
     else
@@ -311,14 +309,12 @@ log_line "INFO" "===== Music pipeline healthcheck start ====="
 
 check_temperature
 check_exists_exec "$CHECKER"
-check_exists_exec "$IMPORTER"
 check_dir_exists "$COMPLETE_DIR"
 check_dir_exists "$QUARANTINE_DIR"
 
 # Core pipeline timers
-check_timer_active "beets-import.timer"
 check_timer_active "music-pipeline-healthcheck.timer"
-check_timer_active "slskd-promote-ready.timer"
+check_timer_active "reconcile-import.timer"
 
 # Pipeline support timers
 check_timer_active "slskd-incomplete-watchdog.timer"
@@ -331,7 +327,6 @@ check_disk_threshold "${SCRATCH_DISK_MOUNT:-/mnt/scratch}" "scratch"
 check_disk_threshold "${STORAGE_DISK_MOUNT:-/mnt/storage}" "storage"
 
 check_recover_status
-check_beets_stale_runtime
 check_backlog
 check_held_folders
 check_recent_errors
