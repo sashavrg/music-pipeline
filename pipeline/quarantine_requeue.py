@@ -4,27 +4,35 @@ slskd-quarantine-requeue.py — Periodic re-queue attempt for quarantined albums
 
 Scans the top-level quarantine dirs and the quarantine/incomplete/ subdir.
 For each album folder:
-  1. If the album is already in the beets library -> remove the quarantine
-     copy and send a Telegram notification (stale quarantine cleanup).
+  1. If the album is already in the beets library -> move the quarantine copy
+     into the reconcile INBOX and notify: the gate decides its fate (DUPLICATE
+     -> reversible graveyard, better-quality -> UPGRADE park). Nothing here
+     hard-deletes — the gate is the one writer AND the one discarder.
   2. If not in library and cooldown has passed -> search slskd and re-queue
      the best result. Cooldown is 7 days between retries; 14 days after a
      successful queue (to let the download complete).
   3. If 0 audio files -> skip silently.
+
+Identity: artist/album come from the files' EMBEDDED TAGS when readable
+(reconcile.scan_folder_to_albumrow — modal tags + validated MBIDs), with the
+cleaned folder name as fallback only. Folder names lie (2026-07-02: a mangled
+name made both this module's old LIKE matcher and the admission gate miss a
+library album, re-downloading it in full); tags mostly don't.
 
 State persisted in pipeline SQLite DB. Designed to run weekly (or on-demand).
 """
 
 import os
 import re
-import shutil
-import sqlite3
 import sys
 import time
 from pathlib import Path
 
 from . import config as cfg
 from . import db as pipeline_db
+from . import identity
 from . import recover
+from . import reconcile
 from . import slskdq
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -33,7 +41,6 @@ QUARANTINE_ROOT    = cfg.QUARANTINE_DIR
 QUARANTINE_SUBDIRS = ['incomplete']
 SKIP_SUBDIRS       = {'unparsed'}
 BEETS_DB           = cfg.BEETS_DB
-LIBRARY_ROOT       = str(cfg.LIBRARY_ROOT)
 LOG_FILE           = cfg.QUARANTINE_REQUEUE_LOG
 
 RETRY_COOLDOWN_H   = 168    # 7 days between search retries
@@ -59,54 +66,40 @@ def log(msg: str, level: str = 'INFO'):
         _log_fh.write(line + '\n')
         _log_fh.flush()
 
-# ── Beets library check ───────────────────────────────────────────────────────
+# ── Beets library check (identity oracle — the same brain as the gate) ───────
 
-def _decode(v) -> str:
-    return v.decode('utf-8', errors='replace') if isinstance(v, bytes) else str(v)
+_LIB_CACHE = None
 
-def beets_track_count(artist: str, album: str) -> int:
+def _library_rows():
+    global _LIB_CACHE
+    if _LIB_CACHE is None:
+        _LIB_CACHE = identity.load_albums(BEETS_DB)
+    return _LIB_CACHE
+
+
+def folder_candidate(folder: Path, artist: str, album: str):
+    """AlbumRow for this quarantine folder: embedded tags first (modal
+    artist/album + validated MBIDs via reconcile's scanner), cleaned folder
+    name only as fallback. Sentinel id -1 (library ids are positive)."""
     try:
-        conn = sqlite3.connect(BEETS_DB, timeout=10)
-        conds, params = [], []
-        if artist:
-            conds.append('(LOWER(albumartist) LIKE ? OR LOWER(artist) LIKE ?)')
-            params += [f'%{artist.lower()}%', f'%{artist.lower()}%']
-        if album:
-            conds.append('LOWER(album) LIKE ?')
-            params.append(f'%{album.lower()}%')
-        where = ' AND '.join(conds) if conds else '1=1'
-        rows = conn.execute(f'SELECT path FROM items WHERE {where}', params).fetchall()
-        conn.close()
-        return sum(1 for (p,) in rows if os.path.exists(_decode(p)))
+        row, _meta = reconcile.scan_folder_to_albumrow(str(folder), sentinel_id=-1)
     except Exception:
-        return 0
+        row = None
+    if row is not None and (row.album or '').strip():
+        return row
+    return identity.AlbumRow(-1, artist or '', album or '', None, '', '', [])
 
-def fs_track_count(artist: str, album: str) -> int:
-    if not os.path.isdir(LIBRARY_ROOT):
-        return 0
-    artist_l = artist.lower().strip() if artist else ''
-    album_l  = album.lower().strip()
-    for adir in os.scandir(LIBRARY_ROOT):
-        if not adir.is_dir():
-            continue
-        if artist_l and artist_l not in adir.name.lower():
-            continue
-        for bdir in os.scandir(adir.path):
-            if not bdir.is_dir():
-                continue
-            clean = re.sub(r'\s*[\(\[].*?[\)\]]', '', bdir.name).strip().lower()
-            if album_l not in bdir.name.lower() and album_l not in clean:
-                continue
-            count = sum(
-                1 for f in os.scandir(bdir.path)
-                if f.is_file() and os.path.splitext(f.name)[1].lower() in AUDIO_EXTS
-            )
-            if count > 0:
-                return count
-    return 0
 
-def in_library(artist: str, album: str) -> int:
-    return max(beets_track_count(artist, album), fs_track_count(artist, album))
+def in_library(row) -> bool:
+    """True when the library already contains this album — decided by
+    build_index(library + candidate), the identical convergence reconcile and
+    the admission gate apply. Replaces the old substring-LIKE + folder-scan
+    matcher, whose false negatives re-acquired owned albums and whose false
+    positives gated a hard delete."""
+    idx = identity.build_index(_library_rows() + [row])
+    by_album = idx['by_album']
+    key = by_album.get(row.album_id)
+    return any(aid != row.album_id and k == key for aid, k in by_album.items())
 
 # ── Folder metadata extraction ────────────────────────────────────────────────
 
@@ -120,8 +113,18 @@ _YEAR_PREFIX_RE = re.compile(r'^\d{4}[-\s,]+')
 _BRACKET_YEAR_RE = re.compile(r'\s*[\[\(]\d{4}[\]\)]')
 _DISC_CODE_RE   = re.compile(r'\b[A-Z]{2,5}\d{3,}\b')
 _CURLY_RE       = re.compile(r'\s*\{[^}]*\}')
+# our own re-queue marker (incomplete_watchdog renames stalled folders); left
+# in the album name it forks the identity key -> the same release gets queued
+# twice (2026-07-02: proven, one remote folder downloaded twice)
+_REQUEUED_RE    = re.compile(r'\.requeued-\d{8}-\d{4,6}')
+# "artists" that are really structure tokens: a date fragment ("05-21", left
+# over from a YYYY-MM-DD prefix) or a disc marker ("DISC 3", "CD2"). Searching
+# slskd with these is noise; better no artist (and let the generic-query
+# guard refuse) than a wrong one.
+_PSEUDO_ARTIST_RE = re.compile(r'(?i)^(\d{1,2}[-–]\d{1,2}|(disc|disk|cd|vol(ume)?)\s*\.?\s*\d+)$')
 
 def clean_name(s: str) -> str:
+    s = _REQUEUED_RE.sub('', s)
     s = _NOISE_RE.sub('', s)
     s = _BRACKET_YEAR_RE.sub('', s)
     s = _YEAR_PREFIX_RE.sub('', s)
@@ -133,8 +136,11 @@ def parse_folder(folder: Path) -> tuple[str, str]:
     name = clean_name(folder.name)
     if ' - ' in name:
         artist, album = name.split(' - ', 1)
-        if not re.fullmatch(r'\d{4}', artist.strip()):
-            return artist.strip(), album.strip()
+        artist = artist.strip()
+        if not re.fullmatch(r'\d{4}', artist) and not _PSEUDO_ARTIST_RE.fullmatch(artist):
+            # "Artist - 2022 - Album": the year survives the split as an album
+            # prefix and forks the identity key
+            return artist, _YEAR_PREFIX_RE.sub('', album.strip()).strip()
     return '', name
 
 def audio_count(folder: Path) -> int:
@@ -186,20 +192,28 @@ def main():
             continue
 
         artist, album = parse_folder(folder)
+        # tags override the folder-name parse when readable — folder names lie
+        cand = folder_candidate(folder, artist, album)
+        if cand.album_id == -1 and (cand.albumartist or cand.album) and \
+                (cand.albumartist, cand.album) != (artist, album):
+            artist, album = (cand.albumartist or artist), (cand.album or album)
         log(f'[CHECK] {key} | artist="{artist}" album="{album}" | files={n_audio}')
 
         # ── Already in library? ───────────────────────────────────────────────
-        lib_count = in_library(artist, album)
-        if lib_count > 0:
-            log(f'[IN-LIBRARY] {key} has {lib_count} track(s) in library — removing quarantine copy')
+        if in_library(cand):
+            log(f'[IN-LIBRARY] {key} — routing quarantine copy to the gate '
+                f'(reconcile decides: duplicate-discard or upgrade-park)')
+            dest = Path(str(cfg.INBOX_DIR)) / folder.name
+            if dest.exists():
+                dest = dest.with_name(f'{folder.name}.fromquar-{int(now)}')
             try:
-                shutil.rmtree(str(folder))
+                os.rename(str(folder), str(dest))   # same fs (both under slskd/)
                 pipeline_db.delete_quarantine_state(key)
-            except Exception as e:
-                log(f'[WARN] could not remove {folder}: {e}')
+            except OSError as e:
+                log(f'[WARN] could not move {folder} to inbox: {e}')
             already_in_lib += 1
             pipeline_db.push_notification('quarantine_cleared', key,
-                                          reason='already_in_library', lib_tracks=lib_count)
+                                          reason='in_library_routed_to_gate')
             continue
 
         # ── Cooldown check ────────────────────────────────────────────────────
