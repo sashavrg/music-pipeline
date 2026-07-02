@@ -4,8 +4,6 @@
 # the `loop INTERVAL CMD` pattern (see docker/loop.sh) to replace the host's
 # systemd timers. Cadences match the host install:
 #
-#   promote-ready          every 3 min
-#   beets-import           every 15 min
 #   healthcheck            every 30 min
 #   incomplete-watchdog    every 30 min
 #   fill-missing-tracks    every 6 hours
@@ -79,16 +77,6 @@ services:
     command: ["slskd-telegram-bot"]
 
   # ─── Periodic services (loop INTERVAL CMD ...) ──────────────────────────────
-  promote-ready:
-    <<: *pipeline-base
-    container_name: pipeline-promote-ready
-    command: ["loop", "180", "slskd-promote-ready", "--min-age-minutes", "10"]
-
-  beets-import:
-    <<: *pipeline-base
-    container_name: pipeline-beets-import
-    command: ["loop", "900", "beets-import.sh"]
-
   incomplete-watchdog:
     <<: *pipeline-base
     container_name: pipeline-incomplete-watchdog

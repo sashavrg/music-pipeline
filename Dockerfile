@@ -9,7 +9,7 @@ FROM python:3.12-slim
 # ─── System deps ──────────────────────────────────────────────────────────────
 #   libchromaprint-tools  fpcalc binary used by the chroma beets plugin
 #   gettext-base          envsubst, used by docker-entrypoint.sh
-#   sqlite3               beets-import.sh shells out for an item-count check
+#   sqlite3               healthcheck queries the slskd ledger
 #   ca-certificates       slskd API + discogs/last.fm/etc.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libchromaprint-tools \
@@ -32,10 +32,10 @@ COPY docker-entrypoint.sh     ./
 # `pip install .` resolves every dep listed in pyproject.toml (beets + plugin
 # extras: mutagen, pyacoustid, beautifulsoup4, python3-discogs-client, pillow,
 # pylast, pyyaml, requests) AND installs the `pipeline` package + the
-# console_scripts (slskd-promote-ready, beets-quality-upgrade, etc.) into
+# console_scripts (slskd-recover, beets-quality-upgrade, etc.) into
 # /usr/local/bin/.
 RUN pip install --no-cache-dir . \
- && install -m 755 bin/beets-import.sh bin/music-pipeline-healthcheck.sh /usr/local/bin/ \
+ && install -m 755 bin/music-pipeline-healthcheck.sh /usr/local/bin/ \
  && chmod +x /usr/local/bin/loop docker-entrypoint.sh
 
 ENV MUSIC_PIPELINE_ROOT=/opt/music-pipeline \

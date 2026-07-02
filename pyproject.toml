@@ -30,7 +30,6 @@ dependencies = [
 ]
 
 [project.scripts]
-slskd-promote-ready          = "pipeline.promote_ready:main"
 slskd-incomplete-watchdog    = "pipeline.incomplete_watchdog:main"
 slskd-fill-missing-tracks    = "pipeline.fill_missing_tracks:main"
 slskd-quarantine-requeue     = "pipeline.quarantine_requeue:main"
@@ -40,7 +39,6 @@ slskd-recover                = "pipeline.recover:main"
 slskd-telegram-bot           = "pipeline.telegram_bot:main"
 pipeline-weekly-digest       = "pipeline.weekly_digest:main"
 beets-quality-upgrade        = "pipeline.beets_quality_upgrade:main"
-beets-apply-staged-deletions = "pipeline.beets_apply_staged_deletions:main"
 check-chromaprint            = "pipeline.check_chromaprint:main"
 
 [tool.setuptools.packages.find]
