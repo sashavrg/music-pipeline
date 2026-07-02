@@ -1,0 +1,12 @@
+[Unit]
+Description=Run pipeline DB backup nightly
+Requires=pipeline-db-backup.service
+
+[Timer]
+OnCalendar=*-*-* 05:30:00
+RandomizedDelaySec=15min
+Persistent=true
+Unit=pipeline-db-backup.service
+
+[Install]
+WantedBy=timers.target
