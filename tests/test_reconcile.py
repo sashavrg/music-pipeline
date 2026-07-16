@@ -261,10 +261,16 @@ class TestLiveDupPlanInvariant(unittest.TestCase):
         self.assertNotEqual(self._route(3669, 3666), 'DUPPLAN_DROP')
         self.assertNotEqual(self._route(3669, 3667), 'DUPPLAN_DROP')
 
-    def test_complementary_fragments_park(self):
-        # 3866 (track 3 'Candidate') fills a gap in 3875; 3380 (track 2) fills 3546
-        self.assertEqual(self._route(3875, 3866), 'PARK')
-        self.assertEqual(self._route(3546, 3380), 'PARK')
+    def test_complementary_fragments_never_dropped(self):
+        # 3866 (track 3 'Candidate') fills a gap in 3875; 3380 (track 2) fills 3546.
+        # The invariant (per this class) is that a complementary fragment is NEVER
+        # DROPPED: it PARKs while both sides are present, and once a side is
+        # legitimately removed the entry resolves DUPPLAN_DONE (drop-absent). Assert
+        # the invariant itself — not the transient PARK — so the test survives DB
+        # drift (3380 was removed post-July-2026 merges) while still failing loudly
+        # if the gate ever DUPPLAN_DROPs a fragment.
+        self.assertNotEqual(self._route(3875, 3866), 'DUPPLAN_DROP')
+        self.assertNotEqual(self._route(3546, 3380), 'DUPPLAN_DROP')
 
     def test_architects_case_variant_not_dropped(self):
         self.assertNotEqual(self._route(3876, 95), 'DUPPLAN_DROP')
