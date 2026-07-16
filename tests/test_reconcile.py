@@ -356,5 +356,78 @@ class TestListCandidateDirs(unittest.TestCase):
         self.assertEqual(len(self._names(skip=[])), 2)
 
 
+class TestChownIntoLibrary(unittest.TestCase):
+    """_chown_into_library re-owns freshly imported files+dirs to cfg.LIBRARY_UID:GID
+    so Plex (owns-only, caps dropped) can later delete them. beets/slskd run as root,
+    so without this every import lands root-owned and undeletable from the UI."""
+
+    def setUp(self):
+        import tempfile, sqlite3, pathlib
+        self._tmp = tempfile.TemporaryDirectory()
+        base = pathlib.Path(self._tmp.name)
+        self.libroot = base / 'music' / 'music'
+        self.album_dir = self.libroot / 'Some Artist' / 'An Album (2020)'
+        self.album_dir.mkdir(parents=True)
+        self.files = [self.album_dir / '01 a.flac', self.album_dir / '02 b.flac']
+        for f in self.files:
+            f.write_bytes(b'x')
+        self.db = str(base / 'library.db')
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE items (id INTEGER, path BLOB, disc INTEGER, "
+                     "track INTEGER, title TEXT, album_id INTEGER)")
+        for i, f in enumerate(self.files, 1):
+            # store RELATIVE to LIBRARY_ROOT, exactly as this beets library does
+            rel = os.path.relpath(str(f), str(self.libroot))
+            conn.execute("INSERT INTO items VALUES (?,?,?,?,?,?)",
+                         (i, os.fsencode(rel), 1, i, f't{i}', 42))
+        conn.commit(); conn.close()
+
+        # capture chown targets instead of really changing ownership (CI isn't root)
+        self.calls = []
+        self._real_chown = os.chown
+        os.chown = lambda p, u, g: self.calls.append((p, u, g))
+
+        # point the module at our temp library + a known uid/gid
+        self._save = (R.LIBRARY_ROOT, R.cfg.LIBRARY_UID, R.cfg.LIBRARY_GID)
+        R.LIBRARY_ROOT = self.libroot
+        R.cfg.LIBRARY_UID, R.cfg.LIBRARY_GID = 4242, 4243
+
+        journal = type('J', (), {'record': lambda self, *a, **k: None})()
+        self.ctx = type('C', (), {})()
+        self.ctx.db_path = self.db
+        self.ctx.journal = journal
+
+    def tearDown(self):
+        os.chown = self._real_chown
+        R.LIBRARY_ROOT, R.cfg.LIBRARY_UID, R.cfg.LIBRARY_GID = self._save
+        self._tmp.cleanup()
+
+    def test_files_and_dirs_reowned(self):
+        res = R._chown_into_library(42, self.ctx)
+        self.assertEqual(res['files'], 2)
+        chowned = {p for p, u, g in self.calls}
+        for f in self.files:                       # every file
+            self.assertIn(os.fsencode(str(f)), chowned)
+        self.assertIn(os.fsencode(str(self.album_dir)), chowned)          # album dir
+        self.assertIn(os.fsencode(str(self.album_dir.parent)), chowned)   # new artist dir
+        # correct owner on every call, and LIBRARY_ROOT itself is never touched
+        self.assertTrue(all((u, g) == (4242, 4243) for _, u, g in self.calls))
+        self.assertNotIn(os.fsencode(str(self.libroot)), chowned)
+
+    def test_disabled_by_negative_uid(self):
+        R.cfg.LIBRARY_UID = -1
+        res = R._chown_into_library(42, self.ctx)
+        self.assertEqual(res, {'chown': 'disabled'})
+        self.assertEqual(self.calls, [])
+
+    def test_chown_failure_never_raises(self):
+        def boom(p, u, g):
+            raise PermissionError("not root")
+        os.chown = boom
+        res = R._chown_into_library(42, self.ctx)   # must not propagate
+        self.assertEqual(res['file_errs'], 2)
+        self.assertGreaterEqual(res['dir_errs'], 1)
+
+
 if __name__ == '__main__':
     unittest.main()

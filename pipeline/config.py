@@ -64,6 +64,13 @@ def open_log_file(path):
 LIBRARY_ROOT       = _path("MUSIC_LIBRARY_ROOT", "/mnt/storage/share/media/music/music")
 AUDIOBOOKS_LIBRARY_ROOT = _path("AUDIOBOOKS_LIBRARY_ROOT", "/mnt/storage/share/media/audiobooks")
 
+# Ownership stamped onto freshly-imported album files/dirs (reconcile runs as root
+# because slskd imports as PUID=0). Default 1000:1000 = the `sasha` account Plex
+# runs as (CapDrop=ALL, so it can only delete what it OWNS). Set MUSIC_LIBRARY_UID=-1
+# to disable the post-import chown entirely.
+LIBRARY_UID        = _int("MUSIC_LIBRARY_UID", 1000)
+LIBRARY_GID        = _int("MUSIC_LIBRARY_GID", 1000)
+
 # Audiobookshelf integration (auto-match worker)
 ABS_URL        = _str("ABS_URL",        "http://localhost:13378")
 # Token lookup falls back to the ABS sqlite DB if this env is unset.
