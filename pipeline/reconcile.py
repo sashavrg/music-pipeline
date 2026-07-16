@@ -1007,6 +1007,49 @@ def _beet_import(folder: str, ctx: RunContext):
     return sorted(post - pre), proc
 
 
+def _chown_into_library(album_id: int, ctx: RunContext) -> dict:
+    """Post-import ownership fix. beets runs as root here (slskd/pipeline PUID=0),
+    so a freshly imported album lands root-owned with no group-write — which makes
+    it UNDELETABLE from Plex, since Plex runs as cfg.LIBRARY_UID with all Linux caps
+    dropped and can only unlink what it owns. Re-own every imported FILE and each of
+    its parent dirs up to (not including) LIBRARY_ROOT to cfg.LIBRARY_UID:GID.
+
+    Best-effort: an ownership failure NEVER fails the import — the album is already
+    correctly in the library; ownership only governs later deletion. Operates on RAW
+    path bytes (identity.load_albums decodes lossily; file ops must not). Set
+    MUSIC_LIBRARY_UID=-1 to disable. chown preserves the setgid bit on dirs (Linux)."""
+    uid, gid = cfg.LIBRARY_UID, cfg.LIBRARY_GID
+    if uid < 0:
+        return {'chown': 'disabled'}
+    root_b = os.fsencode(str(LIBRARY_ROOT))
+    sep_root = root_b + b'/'
+    dirs: set = set()
+    files = ferr = 0
+    for it in read_items_raw(album_id, ctx.db_path):
+        p = it['path']                      # RAW bytes; beets stores paths RELATIVE to `directory`
+        if not p.startswith(b'/'):          # resolve against LIBRARY_ROOT (no chdir at runtime)
+            p = os.path.join(root_b, p)
+        try:
+            os.chown(p, uid, gid)
+            files += 1
+        except OSError:
+            ferr += 1
+        d = os.path.dirname(p)              # collect album dir + any new artist dir
+        while d.startswith(sep_root):
+            dirs.add(d)
+            d = os.path.dirname(d)
+    derr = 0
+    for d in sorted(dirs, key=len, reverse=True):   # deepest first
+        try:
+            os.chown(d, uid, gid)
+        except OSError:
+            derr += 1
+    res = {'chown': 'ok', 'uid': uid, 'gid': gid, 'files': files, 'dirs': len(dirs),
+           'file_errs': ferr, 'dir_errs': derr}
+    ctx.journal.record('DONE', 'CHOWN', album_id=album_id, **res)
+    return res
+
+
 def do_park(entry, ctx: RunContext, reason: str):
     """Move a candidate folder to the same-fs park dir for human review. In
     read-only-source mode (--backlog) record-only, never move the frozen corpus."""
@@ -1065,7 +1108,9 @@ def do_new(entry, ctx: RunContext):
     mb_matched = bool(row and (identity._valid(row.mb_albumid) or identity._valid(row.mb_releasegroupid)))
     mode = 'autotag' if mb_matched else 'asis'
     _upsert_attr(aid, 'reconcile_import', mode, ctx.db_path)
-    ctx.journal.record('DONE', 'NEW', folder=folder, album_id=aid, key=final_key, import_mode=mode)
+    chown = _chown_into_library(aid, ctx)   # so Plex (owns-only, caps dropped) can later delete it
+    ctx.journal.record('DONE', 'NEW', folder=folder, album_id=aid, key=final_key,
+                       import_mode=mode, chown=chown)
     return {'route': 'NEW', 'album_id': aid, 'key': final_key, 'import_mode': mode}
 
 
