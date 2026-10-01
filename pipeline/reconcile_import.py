@@ -59,9 +59,22 @@ def log(msg: str, level: str = "INFO"):
         _log_fh.flush()
 
 
+PLEX_REFRESH_ATTEMPTS = 4
+PLEX_REFRESH_BACKOFF  = (5, 15, 30)   # seconds between attempts 1→2, 2→3, 3→4
+
+
 def _plex_refresh() -> bool:
     """Trigger a full Plex Music-section scan. Reuses the config/section lookup
-    already proven in beets_quality_upgrade. Returns True on a 2xx response."""
+    already proven in beets_quality_upgrade. Returns True on a 2xx response.
+
+    Retried with backoff: an import lands ~1GB of FLAC and Plex is usually
+    mid-scan (FSEvent partial scan) plus analysing loudness when we call. Under
+    that load PMS can briefly stop serving HTTP entirely and answer 401 to a
+    perfectly valid token — that happened 2026-08-15 16:12:54 on the Light as a
+    Feather import, the refresh was skipped, and Plex was left to notice the
+    album on its own. It did, but only after publishing a 5-of-6-track album for
+    44s. One retry would have closed that window, so don't give up on attempt 1.
+    """
     try:
         from . import beets_quality_upgrade as bq
     except Exception as e:  # pragma: no cover - import guard
@@ -74,20 +87,39 @@ def _plex_refresh() -> bool:
         log("[PLEX] no token in beets config — skipping refresh", "WARN")
         return False
     host, port, library = pc["host"], pc["port"], pc["library"]
-    section_id = bq._plex_section_id(host, port, token, library)
-    if section_id is None:
-        log(f"[PLEX] could not resolve section '{library}' — skipping refresh", "WARN")
-        return False
-    url = f"http://{host}:{port}/library/sections/{section_id}/refresh?X-Plex-Token={token}"
-    try:
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            ok = 200 <= resp.status < 300
-        log(f"[PLEX] refreshed section {section_id} ('{library}') — HTTP {resp.status}")
-        return ok
-    except Exception as e:
-        log(f"[PLEX] refresh failed: {e}", "WARN")
-        return False
+
+    last = "unknown"
+    for attempt in range(1, PLEX_REFRESH_ATTEMPTS + 1):
+        try:
+            section_id = bq._plex_section_id(host, port, token, library)
+            if section_id is None:
+                # Transient too: the section lookup is the call that 401s when
+                # PMS is wedged, so treat it as retryable rather than terminal.
+                raise RuntimeError(f"could not resolve section '{library}'")
+            url = (f"http://{host}:{port}/library/sections/{section_id}"
+                   f"/refresh?X-Plex-Token={token}")
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = resp.status
+            if 200 <= status < 300:
+                note = "" if attempt == 1 else f" (attempt {attempt})"
+                log(f"[PLEX] refreshed section {section_id} ('{library}') — "
+                    f"HTTP {status}{note}")
+                return True
+            last = f"HTTP {status}"
+        except Exception as e:
+            last = str(e)
+
+        if attempt < PLEX_REFRESH_ATTEMPTS:
+            delay = PLEX_REFRESH_BACKOFF[attempt - 1]
+            log(f"[PLEX] refresh attempt {attempt}/{PLEX_REFRESH_ATTEMPTS} failed "
+                f"({last}) — retrying in {delay}s", "WARN")
+            time.sleep(delay)
+
+    log(f"[PLEX] refresh failed after {PLEX_REFRESH_ATTEMPTS} attempts "
+        f"({last}) — Plex may show this import incomplete until its own scan "
+        f"catches up", "WARN")
+    return False
 
 
 def _ledger_poll() -> int:
@@ -164,6 +196,45 @@ def _read_summary(run_id: str) -> dict:
         return {}
 
 
+def _read_landed(run_id: str) -> list[dict]:
+    """Per-album detail for the albums this run actually put in the library.
+
+    Reports both the inbox folder name (what was asked for) and the album tag
+    beets filed it under. Those diverge on `asis` imports, where the uploader's
+    tags win because autotag found no confident MB match — e.g. Maiden Voyage
+    arriving tagged as the 'Blue Note 75' box set. Surfacing both means a
+    mis-file is visible in the notification instead of being found weeks later.
+    """
+    plan = Path(str(cfg.LOG_DIR)) / "reconcile" / run_id / "plan.json"
+    out: list[dict] = []
+    if not plan.exists():
+        # _read_summary already warned about the same missing file — the album
+        # detail is a nice-to-have on top of the counts, so stay quiet here.
+        return out
+    try:
+        data = json.loads(plan.read_text(encoding="utf-8"))
+    except Exception as e:
+        log(f"[WARN] could not read plan candidates for {run_id}: {e}", "WARN")
+        return out
+
+    for entry in data.get("candidates", []):
+        if entry.get("route") not in ("NEW", "UPGRADE"):
+            continue
+        cand = entry.get("candidate", {}) or {}
+        folder = Path(str(cand.get("path", ""))).name
+        artist = (cand.get("scanned_albumartist") or "").strip()
+        album  = (cand.get("scanned_album") or "").strip()
+        out.append({
+            "route":  entry.get("route"),
+            "folder": folder,
+            "artist": artist,
+            "album":  album,
+            "year":   cand.get("scanned_year"),
+            "tracks": cand.get("n_audio_files"),
+        })
+    return out
+
+
 def main(argv=None) -> int:
     setup_logging()
     min_age = cfg.RECONCILE_IMPORT_MIN_AGE_MIN
@@ -205,8 +276,9 @@ def main(argv=None) -> int:
     park = int(summ.get("PARK", 0))
     log(f"[SUMMARY] NEW={new} UPGRADE={upg} DUPLICATE={dup} PARK={park} (reconcile rc={rc})")
 
+    plex_ok = None
     if new or upg:
-        _plex_refresh()
+        plex_ok = _plex_refresh()
     else:
         log("[PLEX] no library changes — refresh skipped")
 
@@ -216,6 +288,7 @@ def main(argv=None) -> int:
         pipeline_db.push_notification(
             "reconcile_import", run_id,
             new=new, upgrade=upg, duplicate=dup, park=park, run_id=run_id,
+            albums=_read_landed(run_id), plex_ok=plex_ok,
         )
 
     log("===== reconcile-import done =====")

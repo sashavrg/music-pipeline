@@ -135,7 +135,13 @@ LOST_ALBUMS_FILE = _str("LOST_ALBUMS_FILE", str(LIBRARY_ROOT.parent / "LOST_ALBU
 
 # ─── Tuning constants (env-overridable, sane defaults) ─────────────────────
 # Soulseek peer filtering (shared by recover.py and incomplete-watchdog.py)
-MIN_UPLOAD_SPEED = _int("MIN_UPLOAD_SPEED", 2_000_000)   # bytes/s
+# 0.5 MB/s, matching the AUDIOBOOK profile. This was 2 MB/s, which is far
+# above the Soulseek norm: on 2026-08-25 a Dave Holland search returned 18
+# peers with the album and the floor rejected 17, leaving one peer who was
+# offline — so the request failed outright while complete FLAC copies sat
+# there at 0.6-0.8 MB/s. This is only a hard cutoff; _score_folder() still
+# weights upload speed, so fast peers keep winning when they exist.
+MIN_UPLOAD_SPEED = _int("MIN_UPLOAD_SPEED", 500_000)   # bytes/s
 MAX_PENDING_DL   = _int("MAX_PENDING_DL", 100)
 
 # slskd search/poll behaviour (recover.py)

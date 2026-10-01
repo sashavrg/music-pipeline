@@ -31,6 +31,10 @@ POLL_TIMEOUT      = cfg.TELEGRAM_POLL_TIMEOUT
 POLL_WAIT         = cfg.TELEGRAM_POLL_WAIT
 OFFSET_FILE       = cfg.BOT_STATE_DIR / "offset"
 MAX_MSG_LEN       = 3900
+# How many distinct peers to try before giving up on a queue request.
+# Bounded so a request with dozens of dead candidates cannot stall the
+# single-threaded polling loop behind a long run of slskd timeouts.
+QUEUE_ATTEMPT_LIMIT = 5
 
 if not TELEGRAM_TOKEN:
     raise SystemExit("TELEGRAM_BOT_TOKEN is required")
@@ -116,6 +120,51 @@ def render_notification(notif: dict) -> tuple[str | None, str | None]:
         return (
             f"Sent album notification: {folder}",
             f"✅ Album download complete\n{folder}\nFiles: {files}{_fmt_ts(ts)}",
+        )
+
+    if event == "reconcile_import":
+        # reconcile-import has always queued this event; until now nothing
+        # rendered it, so the row was marked delivered and silently dropped.
+        # Without it the bot goes quiet after "Queued: ..." and the only way to
+        # learn an album landed is to go poke Plex — which is how a mid-scan,
+        # 5-of-6-track album got mistaken for a bad download on 2026-08-15.
+        new    = int(notif.get("new", 0) or 0)
+        upg    = int(notif.get("upgrade", 0) or 0)
+        park   = int(notif.get("park", 0) or 0)
+        dup    = int(notif.get("duplicate", 0) or 0)
+        albums = notif.get("albums") or []
+
+        lines = ["✅ Import complete"]
+        for a in albums[:6]:
+            artist, album = a.get("artist", ""), a.get("album", "")
+            label = f"{artist} – {album}" if artist else (album or a.get("folder", "?"))
+            year  = f" ({a['year']})" if a.get("year") else ""
+            trk   = f" · {a['tracks']} tracks" if a.get("tracks") else ""
+            tag   = "⬆️ " if a.get("route") == "UPGRADE" else ""
+            lines.append(f"  • {tag}{label}{year}{trk}")
+            # asis import: filed under the uploader's tags, not what you asked
+            # for. Flag it here rather than letting it hide in the library.
+            folder_name = (a.get("folder") or "").strip()
+            if folder_name and album and album.lower() not in folder_name.lower():
+                lines.append(f"    ⚠️ requested as \"{folder_name}\" — check tags")
+
+        if len(albums) > 6:
+            lines.append(f"  … and {len(albums) - 6} more")
+
+        counts = [f"NEW {new}", f"UPGRADE {upg}"]
+        if dup:
+            counts.append(f"duplicate {dup}")
+        if park:
+            counts.append(f"🅿️ parked {park}")
+        lines.append("\n" + " | ".join(counts))
+
+        if notif.get("plex_ok") is False:
+            lines.append("⚠️ Plex refresh failed — may look incomplete "
+                         "until Plex rescans")
+
+        return (
+            f"Sent import notification: NEW={new} UPGRADE={upg} PARK={park}",
+            "\n".join(lines) + _fmt_ts(ts),
         )
 
     if event == "dedup_detected":
@@ -481,22 +530,47 @@ def process_query(rec, artist: str, album: str, profile=None):
         hint = f"\n(also tried MusicBrainz '{retry_label}' — no results)" if retry_label else ""
         return False, f"No results found for: {label}{hint}"
 
-    best = recover.find_best_folder(responses, artist=artist, album=album, profile=profile)
-    if best is None:
+    # Ranked candidates, not just the single best: Soulseek peers routinely go
+    # offline between the search response and the download POST (slskd answers
+    # HTTP 500 "User X appears to be offline"). Queueing only the top pick meant
+    # one unlucky peer aborted the whole request even when a dozen other peers
+    # had the same album — that happened 2026-08-25 on 'Dave Holland quintet -
+    # jumpin in'. Walk down the ranking instead.
+    candidates = recover.find_all_folders(responses, artist=artist, album=album,
+                                          profile=profile)
+    if not candidates:
         return False, (
             f"Found {len(responses)} response(s) for {label}, but none passed "
             f"quality/speed filters ({profile.name} profile)."
         )
 
+    best = candidates[0]
     if n_existing > 0 and n_existing >= best.file_count:
         return False, (
             f"Skipped {label}: library already has {n_existing} track(s), "
             f"best result has {best.file_count}."
         )
 
-    ok = recover.queue_download(best)
-    if not ok:
-        return False, f"Failed to queue download for: {label}"
+    best, attempts, failed_users = None, 0, set()
+    for cand in candidates:
+        # One offline peer fails for every folder it shares — don't burn
+        # attempts re-asking the same dead user.
+        if cand.username in failed_users:
+            continue
+        if attempts >= QUEUE_ATTEMPT_LIMIT:
+            break
+        attempts += 1
+        if recover.queue_download(cand):
+            best = cand
+            break
+        failed_users.add(cand.username)
+
+    if best is None:
+        return False, (
+            f"Failed to queue download for: {label}\n"
+            f"Tried {len(failed_users)} peer(s); all unreachable "
+            f"(of {len(candidates)} candidate folder(s))."
+        )
 
     speed_mb = best.upload_speed / 1_000_000
     profile_tag = f" [{profile.name}]" if profile is not recover.MUSIC else ""
@@ -508,6 +582,8 @@ def process_query(rec, artist: str, album: str, profile=None):
         f"Speed: {speed_mb:.1f} MB/s\n"
         f"Score: {best.score}"
     )
+    if failed_users:
+        msg += f"\n(Fell back past {len(failed_users)} offline peer(s).)"
     if retry_label:
         msg += f"\n(Matched via MusicBrainz expansion.)"
     if n_existing:
