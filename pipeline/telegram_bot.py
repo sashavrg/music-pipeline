@@ -133,8 +133,15 @@ def render_notification(notif: dict) -> tuple[str | None, str | None]:
         park   = int(notif.get("park", 0) or 0)
         dup    = int(notif.get("duplicate", 0) or 0)
         albums = notif.get("albums") or []
+        parked = notif.get("parked") or []
 
-        lines = ["✅ Import complete"]
+        # Only claim success when something reached the library. A park-only
+        # run used to say "✅ Import complete" too, and a parked 4-of-18-track
+        # fragment got read as imported (2026-10-01, Madoka OST).
+        if new or upg:
+            lines = ["✅ Import complete"]
+        else:
+            lines = ["🅿️ Nothing imported — needs attention"]
         for a in albums[:6]:
             artist, album = a.get("artist", ""), a.get("album", "")
             label = f"{artist} – {album}" if artist else (album or a.get("folder", "?"))
@@ -150,6 +157,16 @@ def render_notification(notif: dict) -> tuple[str | None, str | None]:
 
         if len(albums) > 6:
             lines.append(f"  … and {len(albums) - 6} more")
+
+        if parked:
+            lines.append("\nParked (not in library):")
+            for p in parked[:6]:
+                trk = f" · {p['tracks']} tracks" if p.get("tracks") else ""
+                lines.append(f"  • {p.get('folder') or '?'}{trk}")
+                if p.get("reason"):
+                    lines.append(f"    ↳ {p['reason']}")
+            if len(parked) > 6:
+                lines.append(f"  … and {len(parked) - 6} more")
 
         counts = [f"NEW {new}", f"UPGRADE {upg}"]
         if dup:
@@ -544,6 +561,9 @@ def process_query(rec, artist: str, album: str, profile=None):
             f"quality/speed filters ({profile.name} profile)."
         )
 
+    # Expand the top pick up front so the merge-mode check below compares the
+    # library against the peer's real folder size, not just the search hits.
+    candidates[0] = recover.expand_folder(candidates[0])
     best = candidates[0]
     if n_existing > 0 and n_existing >= best.file_count:
         return False, (
@@ -560,6 +580,10 @@ def process_query(rec, artist: str, album: str, profile=None):
         if attempts >= QUEUE_ATTEMPT_LIMIT:
             break
         attempts += 1
+        # Search hits only include files matching every query term — on a
+        # compilation asked for by one artist that's a fragment of the album.
+        if cand is not candidates[0]:
+            cand = recover.expand_folder(cand)
         if recover.queue_download(cand):
             best = cand
             break

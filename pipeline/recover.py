@@ -24,7 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PureWindowsPath
 from typing import Optional
 
@@ -143,14 +143,14 @@ def api_get(path: str):
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read())
 
-def api_post(path: str, body) -> Optional[dict]:
+def api_post(path: str, body, timeout: float = 10):
     data = json.dumps(body).encode()
     req = urllib.request.Request(
         SLSKD_URL + path, data=data, method="POST",
         headers=pipeline_db.slskd_headers({"Content-Type": "application/json"}),
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             text = resp.read()
             return json.loads(text) if text else None
     except urllib.error.HTTPError as e:
@@ -701,6 +701,59 @@ def find_all_folders(responses: list, query: str = "",
 
 # ── Download queueing ─────────────────────────────────────────────────────────
 
+# A directory browse is a round-trip to the remote peer, not a local slskd
+# lookup, so it needs more headroom than the 10s used for plain API calls.
+BROWSE_TIMEOUT = 30
+
+
+def expand_folder(folder: FolderResult) -> FolderResult:
+    """Return `folder` with its file list replaced by the peer's FULL directory.
+
+    A search response only carries the files that matched every query term, and
+    queue_download() POSTs exactly `folder.files`. On a compilation requested by
+    one contributing artist that silently fetches a fragment: on 2026-10-01 a
+    '梶浦由記 - Madoka Magica Ultimate Best' request matched only the 4 of 18
+    tracks credited to Kajiura, and reconcile parked the result as an
+    orphan-fragment. Browsing the directory before queueing closes that gap.
+
+    Only files in the folder's chosen format are added, so a share that keeps
+    flac + mp3 copies side by side doesn't double-download, and scans/cue/log
+    are skipped. Best-effort: if the browse fails (peer offline, timeout,
+    unexpected shape) or finds nothing new, the original folder is returned and
+    the caller queues the search matches as before.
+
+    Whole-album producers call this; fill-missing-tracks must NOT — it queues a
+    deliberate subset of tracks.
+    """
+    try:
+        listing = api_post(
+            f"/api/v0/users/{urllib.parse.quote(folder.username, safe='')}/directory",
+            {"directory": folder.directory}, timeout=BROWSE_TIMEOUT,
+        )
+    except Exception as e:
+        log(f"Browse failed ({folder.username}): {e} — queueing search matches only", "WARN")
+        return folder
+    if not isinstance(listing, list):
+        return folder
+
+    full = []
+    for d in listing:
+        if not isinstance(d, dict) or d.get("name") != folder.directory:
+            continue
+        for f in d.get("files") or []:
+            name = f.get("filename", "")
+            if _ext(name) != folder.fmt:
+                continue
+            # Browse returns bare names; downloads need the full remote path.
+            full.append({**f, "filename": f"{folder.directory}\\{name}"})
+
+    if len(full) <= len(folder.files):
+        return folder
+    log(f"Expanded {folder.username}:{folder.directory} from "
+        f"{len(folder.files)} search match(es) to {len(full)} file(s)")
+    return replace(folder, files=full, file_count=len(full))
+
+
 def queue_download(folder: FolderResult) -> bool:
     payload = [{"filename": f["filename"], "size": f.get("size", 0)} for f in folder.files]
     try:
@@ -889,6 +942,7 @@ def main():
             # Phase-6 gate: the slskd in-flight ledger decides admit/refuse and
             # only POSTs (via the post callable) when clear. Refusals (already in
             # library / in flight / cooling / capacity) are NOT errors.
+            best = expand_folder(best)
             d = slskdq.enqueue(artist, album, source='recover',
                                post=lambda: queue_download(best),
                                username=best.username, remote_dir=best.directory,

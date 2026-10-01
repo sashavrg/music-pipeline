@@ -305,6 +305,7 @@ def main():
             # keeps its own 72h re-queue cooldown, so skip the ledger's cooldown
             # (skip_cooldown) but honor in-library / in-flight / capacity. A
             # refusal is not an error.
+            best = recover.expand_folder(best)
             d = slskdq.enqueue(artist, album, source='quarantine',
                                post=lambda: recover.queue_download(best),
                                username=best.username, remote_dir=best.directory,

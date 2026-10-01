@@ -196,6 +196,38 @@ def _read_summary(run_id: str) -> dict:
         return {}
 
 
+def _plan_candidates(run_id: str) -> list[dict]:
+    plan = Path(str(cfg.LOG_DIR)) / "reconcile" / run_id / "plan.json"
+    if not plan.exists():
+        # _read_summary already warned about the same missing file — the album
+        # detail is a nice-to-have on top of the counts, so stay quiet here.
+        return []
+    try:
+        data = json.loads(plan.read_text(encoding="utf-8"))
+    except Exception as e:
+        log(f"[WARN] could not read plan candidates for {run_id}: {e}", "WARN")
+        return []
+    return data.get("candidates", []) or []
+
+
+def _read_parked(run_id: str) -> list[dict]:
+    """Folder + reason for every album this run PARKED instead of importing.
+
+    Without this a park-only run notified as a bare count, which on 2026-10-01
+    read as a successful import of a 4-of-18-track Madoka OST fragment."""
+    out: list[dict] = []
+    for entry in _plan_candidates(run_id):
+        if entry.get("route") != "PARK":
+            continue
+        cand = entry.get("candidate", {}) or {}
+        out.append({
+            "folder": Path(str(cand.get("path", ""))).name,
+            "reason": entry.get("route_reason") or "",
+            "tracks": cand.get("n_audio_files"),
+        })
+    return out
+
+
 def _read_landed(run_id: str) -> list[dict]:
     """Per-album detail for the albums this run actually put in the library.
 
@@ -205,19 +237,8 @@ def _read_landed(run_id: str) -> list[dict]:
     arriving tagged as the 'Blue Note 75' box set. Surfacing both means a
     mis-file is visible in the notification instead of being found weeks later.
     """
-    plan = Path(str(cfg.LOG_DIR)) / "reconcile" / run_id / "plan.json"
     out: list[dict] = []
-    if not plan.exists():
-        # _read_summary already warned about the same missing file — the album
-        # detail is a nice-to-have on top of the counts, so stay quiet here.
-        return out
-    try:
-        data = json.loads(plan.read_text(encoding="utf-8"))
-    except Exception as e:
-        log(f"[WARN] could not read plan candidates for {run_id}: {e}", "WARN")
-        return out
-
-    for entry in data.get("candidates", []):
+    for entry in _plan_candidates(run_id):
         if entry.get("route") not in ("NEW", "UPGRADE"):
             continue
         cand = entry.get("candidate", {}) or {}
@@ -288,7 +309,8 @@ def main(argv=None) -> int:
         pipeline_db.push_notification(
             "reconcile_import", run_id,
             new=new, upgrade=upg, duplicate=dup, park=park, run_id=run_id,
-            albums=_read_landed(run_id), plex_ok=plex_ok,
+            albums=_read_landed(run_id), parked=_read_parked(run_id),
+            plex_ok=plex_ok,
         )
 
     log("===== reconcile-import done =====")

@@ -113,6 +113,7 @@ def main():
         # Phase-6 gate: route through the slskd in-flight ledger. The post
         # callable performs the actual POST only when the gate admits; a refusal
         # (already owned / in flight / cooling / capacity) is not an error.
+        best = recover.expand_folder(best)
         d = slskdq.enqueue(artist, album, source='wishlist',
                            post=lambda: recover.queue_download(best),
                            username=best.username, remote_dir=best.directory,
