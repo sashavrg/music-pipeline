@@ -4,6 +4,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -42,6 +43,20 @@ if not ALLOWED_CHAT_IDS:
     raise SystemExit("TELEGRAM_ALLOWED_CHAT_ID is required")
 
 API_BASE = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+
+# api.telegram.org resolves to IPv6 first and our v6 path drops ~25% of
+# connections (read/handshake timeouts every few minutes); force IPv4 for it.
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _getaddrinfo_v4_for_telegram(host, port, family=0, *args, **kwargs):
+    if host == "api.telegram.org":
+        family = socket.AF_INET
+    return _orig_getaddrinfo(host, port, family, *args, **kwargs)
+
+
+socket.getaddrinfo = _getaddrinfo_v4_for_telegram
 
 _log_fh = None
 running = True
@@ -830,6 +845,23 @@ def acquire_instance_lock():
     _INSTANCE_LOCK = fh  # keep open for process lifetime
 
 
+# Transient Telegram/network errors (timeouts, 429, 5xx) are expected a few times
+# a day. Log them quietly, warn once when a burst reaches POLL_WARN_AFTER
+# consecutive failures, and say when it recovers.
+POLL_WARN_AFTER = 3
+POLL_BACKOFF_MAX = 60
+
+
+def _poll_failed(fails: int, err: str, retry_after=None) -> float:
+    """Record one more consecutive failure; return seconds to sleep."""
+    level = "WARN" if fails == POLL_WARN_AFTER else "DEBUG"
+    suffix = f" ({fails} in a row)" if fails >= POLL_WARN_AFTER else ""
+    log(f"Telegram polling: {err}{suffix}", level)
+    if retry_after:
+        return float(retry_after) + 1
+    return min(POLL_WAIT * 2 ** (fails - 1), POLL_BACKOFF_MAX)
+
+
 def main():
     setup_logging()
     acquire_instance_lock()
@@ -842,6 +874,8 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
 
     offset = load_offset()
+    fails = 0
+    fail_since = 0.0
     while running:
         try:
             data = tg_get(
@@ -856,6 +890,11 @@ def main():
                 log(f"Telegram API not ok: {data}", "WARN")
                 time.sleep(POLL_WAIT)
                 continue
+
+            if fails >= POLL_WARN_AFTER:
+                log(f"Telegram polling recovered after {fails} failures "
+                    f"({int(time.time() - fail_since)}s)")
+            fails = 0
 
             for upd in data.get("result", []):
                 upd_id = upd.get("update_id")
@@ -886,11 +925,21 @@ def main():
                     log(f"Notification send failed; will retry: {notif.get('event')}", "WARN")
 
         except urllib.error.HTTPError as e:
-            log(f"Telegram HTTPError {e.code}: {e.read().decode(errors='replace')}", "WARN")
-            time.sleep(POLL_WAIT)
+            body = e.read().decode(errors="replace")
+            retry_after = None
+            try:
+                retry_after = json.loads(body).get("parameters", {}).get("retry_after")
+            except (ValueError, AttributeError):
+                pass
+            if not fails:
+                fail_since = time.time()
+            fails += 1
+            time.sleep(_poll_failed(fails, f"HTTP {e.code} {body[:120]}", retry_after))
         except Exception as e:
-            log(f"Polling loop error: {e}", "WARN")
-            time.sleep(POLL_WAIT)
+            if not fails:
+                fail_since = time.time()
+            fails += 1
+            time.sleep(_poll_failed(fails, f"{type(e).__name__}: {e}"))
 
     log("slskd-telegram-bot stopped")
 
