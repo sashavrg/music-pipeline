@@ -161,6 +161,13 @@ def _dirkey(s: str) -> str:
     return s.rsplit('/', 1)[-1]
 
 
+def _remote_path_key(path: str) -> str:
+    """Full remote path, slash-normalised and case-folded. Unlike _dirkey this
+    keeps every component, so two folders with the same final name do not
+    collide when we act on a specific transfer."""
+    return (path or '').replace('\\', '/').rstrip('/').casefold()
+
+
 def busy_local_dirs() -> Optional[set]:
     """Local download-folder names (lowercased basenames) that may still be
     receiving files and must NOT be swept by reconcile: every slskd download
@@ -188,16 +195,14 @@ def busy_local_dirs() -> Optional[set]:
 
 def _dir_file_states(transfers: list, username: str, remote_dir: str) -> list:
     """slskd file-state strings for username+remote_dir, or [] if not present."""
-    def remote_key(path):
-        return (path or '').replace('\\', '/').rstrip('/').casefold()
-    want = remote_key(remote_dir)
+    want = _remote_path_key(remote_dir)
     if not want:
         return []  # no directory identity: never guess using the first transfer
     for u in transfers:
         if u.get('username') != username:
             continue
         for d in u.get('directories', []):
-            if remote_key(d.get('directory', '')) == want:
+            if _remote_path_key(d.get('directory', '')) == want:
                 return [f.get('state', '') for f in d.get('files', [])]
     return []
 
@@ -205,13 +210,15 @@ def _dir_file_states(transfers: list, username: str, remote_dir: str) -> list:
 def _cancel_live_transfers(transfers: list, username: str, remote_dir: str) -> int:
     """Cancel the still-queued slskd transfers for username+remote_dir (the
     records stay, as Cancelled). Best-effort; returns how many were cancelled."""
-    want = _dirkey(remote_dir)
+    want = _remote_path_key(remote_dir)
+    if not want:
+        return 0  # never cancel on a guessed directory
     n = 0
     for u in transfers:
         if u.get('username') != username:
             continue
         for d in u.get('directories', []):
-            if _dirkey(d.get('directory', '')) != want:
+            if _remote_path_key(d.get('directory', '')) != want:
                 continue
             for f in d.get('files', []):
                 if _is_live_state(f.get('state', '')) and f.get('id'):
@@ -451,7 +458,10 @@ def _classify_row(row, transfers: list, now: float):
             # peer's "Queued, Remotely", which can sit forever). Past the stale
             # window that is a dead request, not a live one.
             age_h = (now - row['queued_at']) / 3600.0
-            if age_h >= cfg.LEDGER_STALE_EXPIRE_H:
+            # Only a folder where nothing has finished is dead; a partly
+            # downloaded one may still be waiting on the peer for the rest.
+            if (row['state'] == 'queued' and age_h >= cfg.LEDGER_STALE_EXPIRE_H
+                    and all(_is_live_state(s) for s in states)):
                 return 'expired', f'queued in slskd without starting > {cfg.LEDGER_STALE_EXPIRE_H}h'
             return None, ''
         if all(_is_success(s) for s in states):

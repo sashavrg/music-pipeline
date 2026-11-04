@@ -103,12 +103,33 @@ class TestClassifyRow(unittest.TestCase):
         self.assertIsNone(new)
 
     def test_poll_cancels_queue_when_expiring(self):
-        tx = [{'username': 'u', 'directories': [{'directory': 'D', 'files': [
+        tx = [{'username': 'u', 'directories': [{'directory': 'x\\D', 'files': [
             {'id': 'f1', 'state': 'Queued, Remotely'},
             {'id': 'f2', 'state': 'Completed, Succeeded'}]}]}]
         with mock.patch.object(Q, '_api_delete', return_value=True) as d:
             self.assertEqual(Q._cancel_live_transfers(tx, 'u', 'x\\D'), 1)
         d.assert_called_once_with('/api/v0/transfers/downloads/u/f1')
+
+    def test_partly_finished_folder_is_not_expired(self):
+        old = self._row(age_h=Q.cfg.LEDGER_STALE_EXPIRE_H + 1)
+        new, _ = Q._classify_row(
+            old, self._tx(['Completed, Succeeded', 'Queued, Remotely']), time.time())
+        self.assertIsNone(new)
+
+    def test_cancel_matches_full_path_not_basename(self):
+        tx = [{'username': 'u', 'directories': [
+            {'directory': 'a\\Disc 1', 'files': [{'id': 'f1', 'state': 'Queued, Remotely'}]},
+            {'directory': 'b\\Disc 1', 'files': [{'id': 'f2', 'state': 'Queued, Remotely'}]}]}]
+        with mock.patch.object(Q, '_api_delete', return_value=True) as d:
+            self.assertEqual(Q._cancel_live_transfers(tx, 'u', 'a\\Disc 1'), 1)
+        d.assert_called_once_with('/api/v0/transfers/downloads/u/f1')
+
+    def test_cancel_refuses_empty_remote_dir(self):
+        tx = [{'username': 'u', 'directories': [
+            {'directory': 'a', 'files': [{'id': 'f1', 'state': 'Queued, Remotely'}]}]}]
+        with mock.patch.object(Q, '_api_delete', return_value=True) as d:
+            self.assertEqual(Q._cancel_live_transfers(tx, 'u', ''), 0)
+        d.assert_not_called()
 
     def test_queued_with_active_promotes_to_downloading(self):
         new, _ = Q._classify_row(self._row('queued'), self._tx(['InProgress']), time.time())
