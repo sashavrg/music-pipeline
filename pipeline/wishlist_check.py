@@ -26,6 +26,21 @@ MAX_PENDING_DL    = cfg.FILL_MAX_PENDING_DL
 _log_fh = None
 
 
+def _wildcard_query(artist: str, album: str) -> str:
+    """Leading-wildcard the artist's longest word ('gorillaz' -> '*orillaz').
+    Some very popular names return 0 responses as exact terms but match fully
+    with the wildcard. '' when there is nothing worth wildcarding."""
+    words = artist.split()
+    if not words:
+        return ''
+    i = max(range(len(words)), key=lambda k: len(words[k]))
+    if len(words[i]) < 4:
+        return ''
+    words[i] = '*' + words[i][1:]
+    q = f"{' '.join(words)} {album}"
+    return q[:60].rsplit(' ', 1)[0] if len(q) > 60 else q
+
+
 def setup_logging():
     global _log_fh
     _log_fh = cfg.open_log_file(LOG_FILE)
@@ -96,6 +111,16 @@ def main():
             errors += 1
             pipeline_db.update_wishlist_attempt(wid, now)
             continue
+
+        if not responses:
+            wc_query = _wildcard_query(artist, album)
+            if wc_query:
+                log(f'[WILDCARD] #{wid} query="{wc_query}"')
+                try:
+                    responses = recover.slskd_search(wc_query)
+                except Exception as e:
+                    log(f'[ERROR] wildcard search failed for #{wid}: {e}', 'ERROR')
+                    responses = None
 
         if not responses:
             log(f'[NO-RESULTS] #{wid} "{artist} - {album}"')
