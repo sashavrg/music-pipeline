@@ -53,7 +53,7 @@ class TestDirMapping(unittest.TestCase):
         transfers = [{'username': 'u1', 'directories': [
             {'directory': r'shared\Geogaddi', 'files': [
                 {'state': 'Completed, Succeeded'}, {'state': 'InProgress'}]}]}]
-        self.assertEqual(Q._dir_file_states(transfers, 'u1', 'Geogaddi'),
+        self.assertEqual(Q._dir_file_states(transfers, 'u1', 'SHARED/Geogaddi/'),
                          ['Completed, Succeeded', 'InProgress'])
 
     def test_dir_file_states_wrong_user(self):
@@ -91,6 +91,24 @@ class TestClassifyRow(unittest.TestCase):
     def test_still_queued_stays_live(self):
         new, _ = Q._classify_row(self._row(), self._tx(['Queued, Remotely']), time.time())
         self.assertIsNone(new)
+
+    def test_remote_queue_past_stale_window_expires(self):
+        old = self._row(age_h=Q.cfg.LEDGER_STALE_EXPIRE_H + 1)
+        new, _ = Q._classify_row(old, self._tx(['Queued, Remotely'] * 2), time.time())
+        self.assertEqual(new, 'expired')
+
+    def test_old_row_with_active_transfer_stays_live(self):
+        old = self._row('downloading', age_h=Q.cfg.LEDGER_STALE_EXPIRE_H + 1)
+        new, _ = Q._classify_row(old, self._tx(['InProgress', 'Queued, Remotely']), time.time())
+        self.assertIsNone(new)
+
+    def test_poll_cancels_queue_when_expiring(self):
+        tx = [{'username': 'u', 'directories': [{'directory': 'D', 'files': [
+            {'id': 'f1', 'state': 'Queued, Remotely'},
+            {'id': 'f2', 'state': 'Completed, Succeeded'}]}]}]
+        with mock.patch.object(Q, '_api_delete', return_value=True) as d:
+            self.assertEqual(Q._cancel_live_transfers(tx, 'u', 'x\\D'), 1)
+        d.assert_called_once_with('/api/v0/transfers/downloads/u/f1')
 
     def test_queued_with_active_promotes_to_downloading(self):
         new, _ = Q._classify_row(self._row('queued'), self._tx(['InProgress']), time.time())

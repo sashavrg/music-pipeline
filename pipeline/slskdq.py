@@ -56,6 +56,7 @@ import argparse
 import json
 import sys
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import PureWindowsPath
@@ -68,7 +69,7 @@ from . import identity
 BEETS_DB = identity.BEETS_DB
 
 # Producers and the ledger 'source' column values.
-SOURCES = ('recover', 'incomplete', 'quarantine', 'fill', 'wishlist', 'manual')
+SOURCES = ('recover', 'incomplete', 'quarantine', 'fill', 'wishlist', 'manual', 'telegram')
 
 # Decision.state values (machine-readable outcomes).
 ADMITTED        = 'admitted'
@@ -78,6 +79,7 @@ REFUSED_LIBRARY = 'refused:in_library'
 REFUSED_COOLING = 'refused:cooling'
 REFUSED_CAPACITY = 'refused:capacity'
 REFUSED_INFLIGHT = 'refused:in_flight'
+REFUSED_UNAVAILABLE = 'refused:unavailable'
 POST_FAILED     = 'post_failed'
 
 
@@ -107,9 +109,19 @@ def _api_get(path: str):
         return None
 
 
-def _transfers() -> list:
+def _api_delete(path: str) -> bool:
+    req = urllib.request.Request(cfg.SLSKD_URL + path, method='DELETE',
+                                 headers=db.slskd_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except Exception:
+        return False
+
+
+def _transfers() -> Optional[list]:
     data = _api_get('/api/v0/transfers/downloads')
-    return data if isinstance(data, list) else []
+    return data if isinstance(data, list) else None
 
 
 # slskd file-state strings look like "Completed, Succeeded", "Completed, Errored",
@@ -127,10 +139,13 @@ def _is_success(s: str) -> bool:
     return 'Succeeded' in s
 
 
-def pending_download_count() -> int:
+def pending_download_count() -> Optional[int]:
     """slskd's own count of transfers still queued or in progress (capacity gate)."""
+    transfers = _transfers()
+    if transfers is None:
+        return None
     n = 0
-    for u in _transfers():
+    for u in transfers:
         for d in u.get('directories', []):
             for f in d.get('files', []):
                 if _is_live_state(f.get('state', '')):
@@ -173,14 +188,37 @@ def busy_local_dirs() -> Optional[set]:
 
 def _dir_file_states(transfers: list, username: str, remote_dir: str) -> list:
     """slskd file-state strings for username+remote_dir, or [] if not present."""
-    want = _dirkey(remote_dir)
+    def remote_key(path):
+        return (path or '').replace('\\', '/').rstrip('/').casefold()
+    want = remote_key(remote_dir)
+    if not want:
+        return []  # no directory identity: never guess using the first transfer
     for u in transfers:
         if u.get('username') != username:
             continue
         for d in u.get('directories', []):
-            if not remote_dir or _dirkey(d.get('directory', '')) == want:
+            if remote_key(d.get('directory', '')) == want:
                 return [f.get('state', '') for f in d.get('files', [])]
     return []
+
+
+def _cancel_live_transfers(transfers: list, username: str, remote_dir: str) -> int:
+    """Cancel the still-queued slskd transfers for username+remote_dir (the
+    records stay, as Cancelled). Best-effort; returns how many were cancelled."""
+    want = _dirkey(remote_dir)
+    n = 0
+    for u in transfers:
+        if u.get('username') != username:
+            continue
+        for d in u.get('directories', []):
+            if _dirkey(d.get('directory', '')) != want:
+                continue
+            for f in d.get('files', []):
+                if _is_live_state(f.get('state', '')) and f.get('id'):
+                    if _api_delete(f"/api/v0/transfers/downloads/"
+                                   f"{urllib.parse.quote(username, safe='')}/{f['id']}"):
+                        n += 1
+    return n
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -296,6 +334,8 @@ def _gate(artist: str, album: str, key0: str, tier: int, now: float, *,
     # 4. capacity
     cap = cfg.MAX_PENDING_DL if max_pending is None else max_pending
     pending = pending_download_count()
+    if pending is None:
+        return refuse(REFUSED_UNAVAILABLE, 'slskd transfer status unavailable; retry later', key)
     if pending >= cap:
         return refuse(REFUSED_CAPACITY, f'{pending} in flight >= cap {cap}', key)
 
@@ -405,8 +445,14 @@ def _classify_row(row, transfers: list, now: float):
     states = _dir_file_states(transfers, row['username'], row['remote_dir'])
     if states:
         if any(_is_live_state(s) for s in states):
-            if row['state'] == 'queued' and any(_is_active(s) for s in states):
-                return 'downloading', 'in progress'
+            if any(_is_active(s) for s in states):
+                return ('downloading', 'in progress') if row['state'] == 'queued' else (None, '')
+            # Nothing moving: every file is parked in a queue (typically the
+            # peer's "Queued, Remotely", which can sit forever). Past the stale
+            # window that is a dead request, not a live one.
+            age_h = (now - row['queued_at']) / 3600.0
+            if age_h >= cfg.LEDGER_STALE_EXPIRE_H:
+                return 'expired', f'queued in slskd without starting > {cfg.LEDGER_STALE_EXPIRE_H}h'
             return None, ''
         if all(_is_success(s) for s in states):
             return 'completed', f'{len(states)} file(s) succeeded'
@@ -423,12 +469,16 @@ def poll(execute: bool = True) -> list:
     (rowid, identity_key, old_state, new_state) transitions."""
     db.init_db()
     transfers = _transfers()
+    if transfers is None:
+        return []  # outage is not evidence that a live download disappeared
     now = time.time()
     changes = []
     for row in db.ledger_live_rows():
         new, note = _classify_row(row, transfers, now)
         if new and new != row['state']:
             if execute:
+                if new == 'expired':
+                    _cancel_live_transfers(transfers, row['username'], row['remote_dir'])
                 db.ledger_set_state(row['id'], new, note)
             changes.append((row['id'], row['identity_key'], row['state'], new))
     return changes
