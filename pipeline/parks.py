@@ -28,14 +28,17 @@ def _plan_reasons(run_id: str) -> dict:
     """folder-basename -> route_reason for one run, {} when no plan exists."""
     plan = PLAN_ROOT / run_id / "plan.json"
     try:
-        entries = json.loads(plan.read_text(encoding="utf-8")).get("entries", [])
+        doc = json.loads(plan.read_text(encoding="utf-8"))
+        # schema 2 plans use "candidates"; older ones used "entries"
+        entries = doc.get("candidates") or doc.get("entries") or []
     except Exception:
         return {}
     out = {}
     for e in entries:
         path = (e.get("candidate") or {}).get("path", "")
         if path:
-            out[os.path.basename(path)] = e.get("route_reason", "")
+            out[os.path.basename(path)] = (
+                f'{e.get("route", "")}: {e.get("route_reason", "")}'.strip(": "))
     return out
 
 

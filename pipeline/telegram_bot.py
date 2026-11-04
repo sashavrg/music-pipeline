@@ -492,6 +492,20 @@ def _build_query(artist: str, album: str) -> str:
     return q
 
 
+def _wildcard_query(artist: str, album: str) -> str:
+    """Query with the artist's longest word leading-wildcarded ('gorillaz' ->
+    '*orillaz'). Some very popular artist names return 0 responses as exact
+    terms (gorillaz, beatles) yet match fully with a leading wildcard."""
+    words = artist.split()
+    if not words:
+        return ""
+    i = max(range(len(words)), key=lambda k: len(words[k]))
+    if len(words[i]) < 4:
+        return ""
+    words[i] = "*" + words[i][1:]
+    return _build_query(" ".join(words), album)
+
+
 def _mb_retry_query(artist: str, album: str, original_query: str, profile):
     """
     On a 0-result search, ask MusicBrainz for the canonical (artist, album)
@@ -536,6 +550,15 @@ def process_query(rec, artist: str, album: str, profile=None):
     responses  = recover.slskd_search(query)
     if responses is None:
         return False, f"Search error for: {label}"
+
+    # Wildcard retry: big names can come back empty as exact terms.
+    if not responses:
+        wc_q = _wildcard_query(artist, album)
+        if wc_q:
+            log(f"Wildcard retry: '{query}' -> '{wc_q}'")
+            responses = recover.slskd_search(wc_q)
+            if responses is None:
+                return False, f"Search error for: {label}"
 
     # MusicBrainz retry: the bot's "{artist} {album}" query drops 0 results
     # on collab albums (e.g. user types 'Marvin Gaye - United' but Soulseek
