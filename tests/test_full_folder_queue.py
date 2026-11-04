@@ -91,6 +91,9 @@ class TestBotQueuesExpanded(unittest.TestCase):
              mock.patch.object(recover, "slskd_search", return_value=[{"x": 1}]), \
              mock.patch.object(recover, "find_all_folders", return_value=[cand]), \
              mock.patch.object(recover, "api_post", return_value=_listing(FULL)), \
+             mock.patch.object(bot.slskdq, "enqueue",
+                               side_effect=lambda *a, **kw: bot.slskdq.Decision(
+                                   bool(kw['post']()), bot.slskdq.ADMITTED, 'test', 0, 'queued')), \
              mock.patch.object(recover, "queue_download",
                                side_effect=lambda f: queued.append(f) or True):
             ok, msg = bot.process_query(recover, "梶浦由記", "Madoka Magica Ultimate Best")
