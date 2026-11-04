@@ -18,6 +18,7 @@ from . import config as cfg
 from . import db as pipeline_db
 from . import musicbrainz
 from . import recover
+from . import slskdq
 
 LOG_FILE = str(cfg.TELEGRAM_BOT_LOG)
 
@@ -102,6 +103,12 @@ def send_message(chat_id: str, text: str) -> bool:
     except Exception as e:
         log(f"sendMessage failed: {e}", "WARN")
         return False
+
+
+def send_notification(text: str) -> bool:
+    """Attempt every allowed chat even when an earlier recipient fails."""
+    results = [send_message(cid, text) for cid in sorted(ALLOWED_CHAT_IDS)]
+    return all(results)
 
 
 def load_offset() -> int:
@@ -609,6 +616,9 @@ def process_query(rec, artist: str, album: str, profile=None):
             f"best result has {best.file_count}."
         )
 
+    # Unlike the short-lived producers, the bot must invalidate its library
+    # snapshot for every request so newly imported albums are visible.
+    slskdq.refresh_library()
     best, attempts, failed_users = None, 0, set()
     for cand in candidates:
         # One offline peer fails for every folder it shares — don't burn
@@ -622,9 +632,18 @@ def process_query(rec, artist: str, album: str, profile=None):
         # compilation asked for by one artist that's a fragment of the album.
         if cand is not candidates[0]:
             cand = recover.expand_folder(cand)
-        if recover.queue_download(cand):
+        decision = slskdq.enqueue(
+            artist, album, source='telegram',
+            post=lambda: recover.queue_download(cand),
+            skip_in_library=(profile is recover.AUDIOBOOK or n_existing > 0),
+            username=cand.username, remote_dir=cand.directory,
+            file_count=cand.file_count,
+        )
+        if decision.admitted:
             best = cand
             break
+        if decision.state != slskdq.POST_FAILED:
+            return False, f"Not queued: {label}\n{decision.reason}"
         failed_users.add(cand.username)
 
     if best is None:
@@ -937,9 +956,7 @@ def main():
                     # succeed; a partial failure retries the whole batch (may
                     # re-deliver to chats that already got it — acceptable at
                     # this volume).
-                    sent = all(
-                        send_message(cid, tg_text) for cid in sorted(ALLOWED_CHAT_IDS)
-                    )
+                    sent = send_notification(tg_text)
                 if sent:
                     pipeline_db.mark_delivered(ids)
                     if log_msg:

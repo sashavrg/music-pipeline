@@ -774,8 +774,9 @@ def pending_download_count() -> int:
                     if any(s in state for s in ("Queued", "InProgress", "Requested", "Initializing")):
                         count += 1
         return count
-    except Exception:
-        return 0
+    except Exception as e:
+        log(f"Transfer status unavailable; treating queue as full: {e}", "WARN")
+        return MAX_PENDING_DL
 
 
 # ── Progress tracking ─────────────────────────────────────────────────────────
